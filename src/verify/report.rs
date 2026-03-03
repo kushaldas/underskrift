@@ -4,6 +4,8 @@
 //! each signature in a PDF document. Follows the plan's specification
 //! for rich validation results.
 
+use chrono::{DateTime, Utc};
+
 use crate::policy::PolicyResult;
 use crate::verify::chain_verify::CertValidity;
 use crate::verify::extractor::SignatureType;
@@ -60,10 +62,33 @@ pub struct SignatureVerificationResult {
     pub signature_type: SignatureType,
     /// Signer's common name or subject, if extracted
     pub signer_name: Option<String>,
-    /// Signing time from CMS signed attributes, if present
+    /// Signing time from the PDF `/M` dictionary field (unsigned, easily forgeable).
+    ///
+    /// For authenticated signing time, prefer `cms_signing_time` (from CMS signed
+    /// attributes) or `timestamp_time` (from an RFC 3161 timestamp).
     pub signing_time: Option<String>,
+    /// CMS signing-time from the `signingTime` signed attribute (OID 1.2.840.113549.1.9.5).
+    ///
+    /// Present in traditional PKCS#7 / CMS signatures. Absent in PAdES signatures
+    /// (which use timestamps instead). This value is authenticated by the CMS
+    /// signature but represents an unverified claim by the signer's clock.
+    pub cms_signing_time: Option<DateTime<Utc>>,
     /// Timestamp time (from embedded RFC 3161 timestamp), if present
     pub timestamp_time: Option<String>,
+
+    /// Whether the ESS `signingCertificateV2` attribute (RFC 5035) matched the signer cert.
+    ///
+    /// - `Some(true)` — attribute present and cert hash verified successfully
+    /// - `Some(false)` — attribute present but hash mismatch (potential substitution attack)
+    /// - `None` — attribute not present (expected for traditional CMS, required for PAdES)
+    pub ess_cert_id_match: Option<bool>,
+
+    /// The actual time used for certificate path validation.
+    ///
+    /// When a verified signature timestamp is available, this is the timestamp time
+    /// (enabling long-term validation). Otherwise, the current time is used.
+    /// `None` if validation time could not be determined.
+    pub validation_time_used: Option<DateTime<Utc>>,
 
     /// Integrity check: ByteRange is structurally valid
     pub integrity_ok: bool,

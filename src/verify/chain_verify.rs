@@ -258,8 +258,9 @@ pub async fn validate_certificate_path(
     };
 
     // Step 2: Verify the chain against the trust store (signatures + time)
-    let now = {
-        let utc = chrono::Utc::now();
+    // Use the provided validation_time (e.g. from a verified timestamp) or fall back to now.
+    let check_time = {
+        let utc = validation_time.unwrap_or_else(chrono::Utc::now);
         der::DateTime::new(
             utc.format("%Y").to_string().parse().unwrap_or(2026),
             utc.format("%m").to_string().parse().unwrap_or(1),
@@ -272,7 +273,7 @@ pub async fn validate_certificate_path(
     };
 
     let (chain_valid, trust_anchor_subject, anchor_cert) =
-        match trust_store.verify_chain(&chain, now) {
+        match trust_store.verify_chain(&chain, check_time) {
             Ok(anchor) => {
                 let anchor_subject = format!("{}", anchor.tbs_certificate.subject);
                 (true, Some(anchor_subject), Some(anchor))
@@ -287,11 +288,11 @@ pub async fn validate_certificate_path(
     for (i, cert) in chain.iter().enumerate() {
         let subject = format!("{}", cert.tbs_certificate.subject);
 
-        // Time validity: check against current time
-        let time_valid = if let Some(ref now_dt) = now {
+        // Time validity: check against validation time
+        let time_valid = if let Some(ref vt) = check_time {
             let validity = &cert.tbs_certificate.validity;
-            *now_dt >= validity.not_before.to_date_time()
-                && *now_dt <= validity.not_after.to_date_time()
+            *vt >= validity.not_before.to_date_time()
+                && *vt <= validity.not_after.to_date_time()
         } else {
             true // No time to check against
         };
@@ -466,7 +467,7 @@ pub fn validate_certificate_path_blocking(
 /// - A self-signed certificate is found (root CA in the embedded set)
 /// - No issuer is found in the embedded set (issuer should be in the trust store)
 /// - Maximum chain depth is exceeded (prevents loops)
-fn build_chain(
+pub(crate) fn build_chain(
     signer_cert: &Certificate,
     embedded_certs: &[Certificate],
 ) -> Result<Vec<Certificate>, String> {

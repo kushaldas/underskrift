@@ -21,9 +21,17 @@ use spki::AlgorithmIdentifierOwned;
 use x509_cert::attr::{Attribute, AttributeValue};
 use x509_cert::Certificate;
 
+use const_oid::ObjectIdentifier;
+
 use crate::crypto::algorithm::{DigestAlgorithm, SignatureAlgorithm};
 use crate::crypto::traits::CryptoSigner;
 use crate::error::CmsError;
+
+/// OID for the CMS Algorithm Protection attribute (RFC 6211).
+/// `id-aa-CMSAlgorithmProtection OBJECT IDENTIFIER ::= { iso(1) member-body(2)
+///   us(840) rsadsi(113549) pkcs(1) pkcs-9(9) 52 }`
+pub(crate) const ID_AA_CMS_ALGORITHM_PROTECTION: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.52");
 
 /// The mode of CMS construction — affects which signed attributes are included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +214,7 @@ impl<'a> PdfCmsBuilder<'a> {
     /// Always includes:
     /// - `contentType` (id-data)
     /// - `messageDigest` (the hash of the PDF byte ranges)
+    /// - `CMSAlgorithmProtection` (RFC 6211 — digest + signature algo binding)
     ///
     /// PAdES additionally includes:
     /// - `signingCertificateV2` (ESS)
@@ -238,6 +247,11 @@ impl<'a> PdfCmsBuilder<'a> {
                 }
             }
         }
+
+        // 4. CMS Algorithm Protection (RFC 6211) — always included
+        let digest_alg = self.digest_algorithm_identifier();
+        let sig_alg = self.signature_algorithm_identifier()?;
+        attrs.push(build_cms_algorithm_protection_attr(&digest_alg, &sig_alg)?);
 
         SetOfVec::try_from(attrs)
             .map_err(|e| CmsError::Builder(format!("failed to build signed attributes set: {e}")))
@@ -496,6 +510,57 @@ fn build_signing_time_attr(time: &chrono::NaiveDateTime) -> Result<Attribute, Cm
     })
 }
 
+/// Build the CMS Algorithm Protection signed attribute (RFC 6211).
+///
+/// This attribute binds the digest and signature algorithms to the signed
+/// data, preventing algorithm substitution attacks where an adversary modifies
+/// the algorithm identifiers in the unsigned portions of `SignerInfo`.
+///
+/// ASN.1 structure:
+/// ```text
+/// CMSAlgorithmProtection ::= SEQUENCE {
+///     digestAlgorithm         DigestAlgorithmIdentifier,
+///     signatureAlgorithm  [1] SignatureAlgorithmIdentifier OPTIONAL,
+///     macAlgorithm        [2] MessageAuthenticationCodeAlgorithm OPTIONAL
+/// }
+/// ```
+///
+/// For `SignedData`, `signatureAlgorithm` with IMPLICIT tag `[1]` is always present.
+fn build_cms_algorithm_protection_attr(
+    digest_alg: &AlgorithmIdentifierOwned,
+    sig_alg: &AlgorithmIdentifierOwned,
+) -> Result<Attribute, CmsError> {
+    // 1. DER-encode the digestAlgorithm
+    let digest_alg_der = digest_alg
+        .to_der()
+        .map_err(|e| CmsError::Der(format!("failed to encode digest alg for CMS-AP: {e}")))?;
+
+    // 2. DER-encode the signatureAlgorithm, then re-tag as IMPLICIT [1]
+    let sig_alg_der = sig_alg
+        .to_der()
+        .map_err(|e| CmsError::Der(format!("failed to encode sig alg for CMS-AP: {e}")))?;
+    let tagged_sig_alg = encode_context_implicit(1, &sig_alg_der);
+
+    // 3. Build the CMSAlgorithmProtection SEQUENCE
+    let cmsap_seq = encode_sequence(&[&digest_alg_der, &tagged_sig_alg]);
+
+    // 4. Wrap as an Attribute
+    let value = AttributeValue::from_der(&cmsap_seq).map_err(|e| {
+        CmsError::Der(format!(
+            "failed to parse CMSAlgorithmProtection as AttributeValue: {e}"
+        ))
+    })?;
+    let mut values = SetOfVec::new();
+    values
+        .insert(value)
+        .map_err(|e| CmsError::Builder(format!("failed to insert CMS-AP value: {e}")))?;
+
+    Ok(Attribute {
+        oid: ID_AA_CMS_ALGORITHM_PROTECTION,
+        values,
+    })
+}
+
 /// Build the DER encoding of IssuerSerial for ESS signingCertificateV2.
 ///
 /// ```text
@@ -556,6 +621,21 @@ fn encode_context_explicit(tag_num: u8, content: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Encode a context-specific IMPLICIT tag by replacing the outer tag of a
+/// constructed value (e.g., a SEQUENCE) with the context-specific tag.
+///
+/// For IMPLICIT tagging, we replace the original tag byte (e.g., 0x30 for SEQUENCE)
+/// with the context-specific constructed tag (0xA0 | tag_num). The length and
+/// content remain unchanged. This is correct for constructed types like
+/// `AlgorithmIdentifier` which are SEQUENCEs.
+fn encode_context_implicit(tag_num: u8, der: &[u8]) -> Vec<u8> {
+    assert!(!der.is_empty(), "cannot IMPLICIT-tag empty DER");
+    let mut out = der.to_vec();
+    // Replace the outer tag (0x30 for SEQUENCE) with context-specific constructed
+    out[0] = 0xA0 | tag_num;
+    out
+}
+
 /// Encode DER definite-form length.
 fn encode_length(out: &mut Vec<u8>, len: usize) {
     if len < 0x80 {
@@ -597,8 +677,17 @@ fn length_bytes(len: usize) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Expose CMS-AP builder for cross-module testing.
+    pub(crate) fn build_cmsap_for_test(
+        digest_alg: &AlgorithmIdentifierOwned,
+        sig_alg: &AlgorithmIdentifierOwned,
+    ) -> Attribute {
+        build_cms_algorithm_protection_attr(digest_alg, sig_alg)
+            .expect("failed to build CMS-AP for test")
+    }
 
     #[test]
     fn test_content_type_attr() {
@@ -688,12 +777,18 @@ mod tests {
         let si = &signed_data.signer_infos.0.as_slice()[0];
         assert!(si.signed_attrs.is_some());
         let attrs = si.signed_attrs.as_ref().unwrap();
-        // Should have: contentType, messageDigest, signingCertificateV2 (PAdES mode)
+        // Should have: contentType, messageDigest, signingCertificateV2, CMSAlgorithmProtection (PAdES mode)
         assert!(
-            attrs.len() >= 3,
-            "expected at least 3 signed attributes, got {}",
+            attrs.len() >= 4,
+            "expected at least 4 signed attributes, got {}",
             attrs.len()
         );
+
+        // Verify CMS-AP attribute is present
+        let has_cmsap = attrs
+            .iter()
+            .any(|a| a.oid == ID_AA_CMS_ALGORITHM_PROTECTION);
+        assert!(has_cmsap, "CMS Algorithm Protection attribute not found");
     }
 
     #[test]
@@ -722,11 +817,54 @@ mod tests {
 
         let si = &signed_data.signer_infos.0.as_slice()[0];
         let attrs = si.signed_attrs.as_ref().unwrap();
-        // Traditional with signing_time: contentType, messageDigest, signingTime
+        // Traditional with signing_time: contentType, messageDigest, signingTime, CMSAlgorithmProtection
         assert!(
-            attrs.len() >= 3,
-            "expected at least 3 signed attributes, got {}",
+            attrs.len() >= 4,
+            "expected at least 4 signed attributes, got {}",
             attrs.len()
         );
+
+        // Verify CMS-AP attribute is present in Traditional mode too
+        let has_cmsap = attrs
+            .iter()
+            .any(|a| a.oid == ID_AA_CMS_ALGORITHM_PROTECTION);
+        assert!(
+            has_cmsap,
+            "CMS Algorithm Protection attribute not found in Traditional mode"
+        );
+    }
+
+    #[test]
+    fn test_cms_algorithm_protection_attr_structure() {
+        // Build a CMS-AP attribute and verify its DER structure
+        let digest_alg = AlgorithmIdentifierOwned {
+            oid: rfc5912::ID_SHA_256,
+            parameters: None,
+        };
+        let null_any = Any::new(Tag::Null, Vec::new()).unwrap();
+        let sig_alg = AlgorithmIdentifierOwned {
+            oid: rfc5912::SHA_256_WITH_RSA_ENCRYPTION,
+            parameters: Some(null_any),
+        };
+
+        let attr = build_cms_algorithm_protection_attr(&digest_alg, &sig_alg).unwrap();
+        assert_eq!(attr.oid, ID_AA_CMS_ALGORITHM_PROTECTION);
+        assert_eq!(attr.values.len(), 1);
+
+        // Parse the attribute value back as DER and verify structure
+        let value = attr.values.iter().next().unwrap();
+        let value_der = value.to_der().unwrap();
+        // Should be a SEQUENCE containing digestAlgorithm + [1] signatureAlgorithm
+        assert_eq!(value_der[0], 0x30, "expected SEQUENCE tag");
+    }
+
+    #[test]
+    fn test_encode_context_implicit() {
+        // A simple SEQUENCE: 0x30 0x03 0x02 0x01 0x05
+        let seq = vec![0x30, 0x03, 0x02, 0x01, 0x05];
+        let tagged = encode_context_implicit(1, &seq);
+        // Should replace 0x30 with 0xA1
+        assert_eq!(tagged[0], 0xA1);
+        assert_eq!(&tagged[1..], &seq[1..]);
     }
 }

@@ -256,7 +256,10 @@ mod tests {
             signature_type: SignatureType::Pades,
             signer_name: Some("CN=Test Signer".into()),
             signing_time: Some("2025-01-01T00:00:00Z".into()),
+            cms_signing_time: None,
             timestamp_time: None,
+            ess_cert_id_match: None,
+            validation_time_used: None,
             integrity_ok,
             covers_whole_document: true,
             integrity_issues: if integrity_ok {

@@ -253,6 +253,11 @@ impl<'a> SignatureVerifier<'a> {
         is_last: bool,
         revision_analysis: Option<&RevisionAnalysis>,
     ) -> SignatureVerificationResult {
+        // Dispatch: DocTimestamp uses a completely different verification path
+        if sig.signature_type == SignatureType::DocTimestamp {
+            return self.verify_doc_timestamp_signature(pdf_data, sig, is_last, revision_analysis);
+        }
+
         let mut all_issues = Vec::new();
 
         // --- Step A: ByteRange integrity ---
@@ -269,14 +274,12 @@ impl<'a> SignatureVerifier<'a> {
         all_issues.extend(integrity_result.issues);
 
         // --- Step B: CMS cryptographic verification ---
-        let (crypto_validity, digest_matches, signer_cert, embedded_certs, _cms_digest_alg) =
+        let (crypto_validity, digest_matches, signer_cert, embedded_certs, _cms_digest_alg, cms_signing_time, ess_cert_id_match, signature_timestamp_token, signature_value) =
             match cms_verify::verify_cms(&sig.cms_bytes, &integrity_result.data_hash) {
                 Ok(cms_result) => {
                     all_issues.extend(cms_result.issues.clone());
 
-                    let crypto_validity = if cms_result.signature_valid {
-                        CryptoValidity::Valid
-                    } else {
+                    let crypto_validity = if !cms_result.signature_valid {
                         let reason = cms_result
                             .issues
                             .iter()
@@ -284,6 +287,12 @@ impl<'a> SignatureVerifier<'a> {
                             .cloned()
                             .unwrap_or_else(|| "unknown".to_string());
                         CryptoValidity::Invalid(reason)
+                    } else if !cms_result.algorithm_protection_ok {
+                        CryptoValidity::Invalid(
+                            "CMS Algorithm Protection mismatch (RFC 6211)".to_string(),
+                        )
+                    } else {
+                        CryptoValidity::Valid
                     };
 
                     // If CMS says a different digest algorithm than our default,
@@ -311,6 +320,10 @@ impl<'a> SignatureVerifier<'a> {
                         cms_result.signer_certificate,
                         cms_result.embedded_certificates,
                         Some(actual_digest),
+                        cms_result.cms_signing_time,
+                        cms_result.ess_cert_id_match,
+                        cms_result.signature_timestamp_token,
+                        cms_result.signature_value,
                     )
                 }
                 Err(e) => {
@@ -321,9 +334,53 @@ impl<'a> SignatureVerifier<'a> {
                         None,
                         Vec::new(),
                         None,
+                        None,
+                        None,
+                        None,
+                        Vec::new(),
                     )
                 }
             };
+
+        // --- Step B2: Verify signature timestamp token ---
+        // If the CMS contains a signature timestamp (id-aa-signatureTimeStampToken),
+        // verify it against the TSA trust store and extract the verified time.
+        let (timestamp_time, validation_time_used) = if let Some(ref token_der) =
+            signature_timestamp_token
+        {
+            if let Some(tsa_store) = self.trust_stores.tsa() {
+                match cms_verify::verify_timestamp_token(token_der, &signature_value, tsa_store) {
+                    Ok(ts_result) => {
+                        all_issues.extend(ts_result.issues);
+                        if ts_result.tsa_signature_valid
+                            && ts_result.message_imprint_valid
+                            && ts_result.tsa_chain_trusted
+                        {
+                            // Fully verified timestamp — use it for validation time
+                            let ts_str = ts_result.gen_time.to_rfc3339();
+                            (Some(ts_str), Some(ts_result.gen_time))
+                        } else {
+                            // Timestamp token present but verification incomplete
+                            let ts_str = ts_result.gen_time.to_rfc3339();
+                            all_issues.push(
+                                "signature timestamp present but not fully verified".to_string(),
+                            );
+                            (Some(ts_str), None)
+                        }
+                    }
+                    Err(e) => {
+                        all_issues.push(format!("signature timestamp verification failed: {e}"));
+                        (None, None)
+                    }
+                }
+            } else {
+                all_issues
+                    .push("signature timestamp present but no TSA trust store configured".to_string());
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
 
         // --- Step C: Certificate chain validation ---
         // When allow_online + ltv feature: full path validation with revocation
@@ -334,7 +391,12 @@ impl<'a> SignatureVerifier<'a> {
                 if let Some(sig_store) = self.trust_stores.sig() {
                     if self.allow_online {
                         // Online path validation with per-cert revocation checking
-                        self.verify_chain_online(signer_cert, &embedded_certs, sig_store)
+                        self.verify_chain_online(
+                            signer_cert,
+                            &embedded_certs,
+                            sig_store,
+                            validation_time_used,
+                        )
                     } else {
                         // Offline-only chain verification
                         let chain_result =
@@ -418,7 +480,15 @@ impl<'a> SignatureVerifier<'a> {
 
         // --- Step F: Determine PAdES level ---
         let pades_level = match sig.signature_type {
-            SignatureType::Pades => DetectedPadesLevel::BB, // TODO: detect B-T/B-LT/B-LTA
+            SignatureType::Pades => {
+                if signature_timestamp_token.is_some() {
+                    // Has a signature timestamp → at least B-T
+                    // TODO: check for DSS/VRI to detect B-LT, doc timestamps for B-LTA
+                    DetectedPadesLevel::BT
+                } else {
+                    DetectedPadesLevel::BB
+                }
+            }
             SignatureType::DocTimestamp => DetectedPadesLevel::Unknown,
             _ => DetectedPadesLevel::NotPades,
         };
@@ -440,7 +510,10 @@ impl<'a> SignatureVerifier<'a> {
             signature_type: sig.signature_type.clone(),
             signer_name,
             signing_time: sig.signing_time.clone(),
-            timestamp_time: None, // TODO: extract from CMS unsigned attributes
+            cms_signing_time,
+            timestamp_time,
+            ess_cert_id_match,
+            validation_time_used,
             integrity_ok,
             covers_whole_document,
             integrity_issues,
@@ -467,6 +540,223 @@ impl<'a> SignatureVerifier<'a> {
         sig_result
     }
 
+    /// Verify a document timestamp signature (SubFilter ETSI.RFC3161).
+    ///
+    /// Document timestamps differ from regular signatures:
+    /// - The CMS `/Contents` IS the timestamp token (not a detached signature)
+    /// - The `messageDigest` signed attr = hash of encapsulated TSTInfo DER
+    /// - The TSTInfo `messageImprint` = hash of the byte-range data
+    /// - Chain validation uses the TSA trust store (not the signature trust store)
+    /// - No signingTime, no ESSCertIDv2, no signature timestamp in unsigned attrs
+    fn verify_doc_timestamp_signature(
+        &self,
+        pdf_data: &[u8],
+        sig: &ExtractedSignature,
+        is_last: bool,
+        revision_analysis: Option<&RevisionAnalysis>,
+    ) -> SignatureVerificationResult {
+        let mut all_issues = Vec::new();
+        let default_digest = DigestAlgorithm::Sha256;
+
+        // --- Step A: ByteRange integrity ---
+        let integrity_result =
+            integrity::verify_byte_range(pdf_data, &sig.byte_range, default_digest);
+        let integrity_ok = integrity_result.valid;
+        let covers_whole_document = integrity_result.covers_whole_file;
+        let integrity_issues = integrity_result.issues.clone();
+        all_issues.extend(integrity_result.issues);
+
+        // --- Step B: Verify document timestamp ---
+        // For DocTimestamp, use verify_doc_timestamp() which:
+        //   1. Verifies TSA CMS signature (messageDigest = hash of TSTInfo)
+        //   2. Verifies TSA certificate chain against TSA trust store
+        //   3. Validates TSTInfo messageImprint against byte-range hash
+        //   4. Extracts genTime
+        let (crypto_validity, digest_matches, timestamp_time, validation_time_used, signer_name, chain_trusted, trust_anchor) =
+            if let Some(tsa_store) = self.trust_stores.tsa() {
+                match cms_verify::verify_doc_timestamp(
+                    &sig.cms_bytes,
+                    &integrity_result.data_hash,
+                    default_digest,
+                    tsa_store,
+                ) {
+                    Ok(ts_result) => {
+                        // If the TSTInfo uses a different hash algorithm than our default,
+                        // re-hash the byte range with the correct algorithm and retry.
+                        let (final_result, _used_rehash) = if !ts_result.message_imprint_valid {
+                            if let Some(tst_alg) = ts_result.tst_hash_algorithm {
+                                if tst_alg != default_digest {
+                                    let rehash = integrity::compute_byte_range_hash(
+                                        pdf_data,
+                                        &sig.byte_range,
+                                        tst_alg,
+                                    );
+                                    match cms_verify::verify_doc_timestamp(
+                                        &sig.cms_bytes,
+                                        &rehash,
+                                        tst_alg,
+                                        tsa_store,
+                                    ) {
+                                        Ok(retry_result) => (retry_result, true),
+                                        Err(_) => (ts_result, false),
+                                    }
+                                } else {
+                                    (ts_result, false)
+                                }
+                            } else {
+                                (ts_result, false)
+                            }
+                        } else {
+                            (ts_result, false)
+                        };
+
+                        all_issues.extend(final_result.issues.clone());
+
+                        let crypto_valid = if final_result.tsa_signature_valid {
+                            CryptoValidity::Valid
+                        } else {
+                            CryptoValidity::Invalid(
+                                "TSA signature verification failed".to_string(),
+                            )
+                        };
+
+                        let digest_ok = final_result.message_imprint_valid;
+                        let chain_ok = final_result.tsa_chain_trusted;
+
+                        // If all checks pass, the genTime is the verified timestamp
+                        let (ts_time, val_time) = if final_result.tsa_signature_valid
+                            && final_result.message_imprint_valid
+                            && final_result.tsa_chain_trusted
+                        {
+                            let ts_str = final_result.gen_time.to_rfc3339();
+                            (Some(ts_str), Some(final_result.gen_time))
+                        } else {
+                            let ts_str = final_result.gen_time.to_rfc3339();
+                            all_issues.push(
+                                "doc timestamp present but not fully verified".to_string(),
+                            );
+                            (Some(ts_str), None)
+                        };
+
+                        // For trust anchor, we got it from the TSA chain verification
+                        // inside verify_doc_timestamp. We don't have it directly here,
+                        // so we report the TSA signer name.
+                        (
+                            crypto_valid,
+                            digest_ok,
+                            ts_time,
+                            val_time,
+                            final_result.tsa_signer_name,
+                            chain_ok,
+                            None::<String>, // trust anchor not directly available
+                        )
+                    }
+                    Err(e) => {
+                        all_issues.push(format!("doc timestamp verification error: {e}"));
+                        (
+                            CryptoValidity::Invalid(e.to_string()),
+                            false,
+                            None,
+                            None,
+                            None,
+                            false,
+                            None,
+                        )
+                    }
+                }
+            } else {
+                all_issues.push("doc timestamp present but no TSA trust store configured".to_string());
+                (
+                    CryptoValidity::Invalid("no TSA trust store configured".to_string()),
+                    false,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                )
+            };
+
+        // --- Step C: Certificate validity ---
+        // For DocTimestamp, the "certificate validity" reflects the TSA chain status.
+        // The chain was already verified inside verify_doc_timestamp().
+        let certificate_validity = if chain_trusted {
+            CertValidity::Valid
+        } else if signer_name.is_some() {
+            CertValidity::UntrustedRoot
+        } else {
+            CertValidity::ChainIncomplete
+        };
+
+        // --- Step D: Check post-signature modifications (revision analysis) ---
+        let (modifications_after_signing, covers_whole_doc_rev, extended_by_non_safe) =
+            if let Some(analysis) = revision_analysis {
+                let covers = analysis.covers_whole_document(&sig.byte_range);
+                let extended = analysis.is_extended_by_non_safe_updates(&sig.byte_range);
+                let modified = !covers;
+                (modified, Some(covers), Some(extended))
+            } else {
+                let modified = if is_last {
+                    integrity::check_post_signature_modifications(pdf_data, &sig.byte_range)
+                } else {
+                    true
+                };
+                (modified, None, None)
+            };
+
+        // --- Step E: Compute overall status ---
+        let status = compute_overall_status(
+            integrity_ok,
+            &crypto_validity,
+            digest_matches,
+            chain_trusted,
+        );
+
+        let summary = build_summary(&status, &all_issues);
+
+        // Build the result
+        let mut sig_result = SignatureVerificationResult {
+            field_name: sig.field_name.clone(),
+            status,
+            signature_type: sig.signature_type.clone(),
+            signer_name,
+            signing_time: sig.signing_time.clone(),
+            cms_signing_time: None,        // DocTimestamps don't have signingTime
+            timestamp_time,
+            ess_cert_id_match: None,       // DocTimestamps don't have ESSCertIDv2
+            validation_time_used,
+            integrity_ok,
+            covers_whole_document,
+            integrity_issues,
+            cryptographic_validity: crypto_validity,
+            digest_matches,
+            certificate_validity,
+            chain_trusted,
+            trust_anchor,
+            #[cfg(feature = "ltv")]
+            revocation_status: None,       // TSA revocation not checked here (yet)
+            #[cfg(not(feature = "ltv"))]
+            revocation_status: None,
+            #[cfg(feature = "ltv")]
+            per_cert_revocation: Vec::new(),
+            #[cfg(not(feature = "ltv"))]
+            per_cert_revocation: Vec::new(),
+            pades_level: DetectedPadesLevel::Unknown, // DocTimestamp is not a PAdES level itself
+            modifications_after_signing,
+            covers_whole_document_revision: covers_whole_doc_rev,
+            extended_by_non_safe_updates: extended_by_non_safe,
+            policy_result: None,
+            summary,
+        };
+
+        // --- Step F: Policy evaluation ---
+        if let Some(ref policy) = self.policy {
+            sig_result.policy_result = Some(policy.evaluate(&sig_result));
+        }
+
+        sig_result
+    }
+
     /// Perform online path validation with revocation checking.
     ///
     /// Uses `validate_certificate_path_blocking` to run the async revocation
@@ -478,6 +768,7 @@ impl<'a> SignatureVerifier<'a> {
         signer_cert: &x509_cert::Certificate,
         embedded_certs: &[x509_cert::Certificate],
         trust_store: &crate::trust::TrustStore,
+        validation_time: Option<chrono::DateTime<chrono::Utc>>,
     ) -> (
         CertValidity,
         bool,
@@ -510,7 +801,7 @@ impl<'a> SignatureVerifier<'a> {
             &config,
             &crl,
             &ocsp,
-            None,
+            validation_time,
         ));
 
         // Convert PathValidationResult to the tuple format expected by verify_single_signature
