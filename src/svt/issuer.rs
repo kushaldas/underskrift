@@ -537,7 +537,13 @@ mod tests {
 
     #[test]
     fn test_new_unsupported_algorithm() {
-        let result = SvtIssuer::new("EdDSA", vec![], vec![]);
+        let result = SvtIssuer::new("NONE", vec![], vec![]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_new_eddsa_algorithm_supported() {
+        let result = SvtIssuer::new("EdDSA", vec![], vec![]);
+        assert!(result.is_ok());
     }
 }

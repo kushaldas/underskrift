@@ -132,22 +132,67 @@ impl SoftwareSigner {
         self.digest_algorithm = alg;
         self
     }
+
+    /// Set the signature algorithm.
+    ///
+    /// For RSA keys, this allows switching between PKCS#1 v1.5 (default)
+    /// and RSA-PSS padding. For ECDSA keys, this is ignored (the algorithm
+    /// is determined by the key type).
+    pub fn with_signature_algorithm(mut self, alg: SignatureAlgorithm) -> Self {
+        self.signature_algorithm = alg;
+        self
+    }
 }
 
 impl CryptoSigner for SoftwareSigner {
     fn sign_hash(&self, hash: &[u8]) -> Result<Vec<u8>, CryptoError> {
         match &self.key {
-            SigningKey::Rsa(key) => {
-                use rsa::Pkcs1v15Sign;
-                let padding = match self.digest_algorithm {
-                    DigestAlgorithm::Sha256 => Pkcs1v15Sign::new::<sha2::Sha256>(),
-                    DigestAlgorithm::Sha384 => Pkcs1v15Sign::new::<sha2::Sha384>(),
-                    DigestAlgorithm::Sha512 => Pkcs1v15Sign::new::<sha2::Sha512>(),
-                };
-                key.sign(padding, hash)
-                    .map(|sig| sig.to_vec())
-                    .map_err(|e| CryptoError::SigningFailed(e.to_string()))
-            }
+            SigningKey::Rsa(key) => match self.signature_algorithm {
+                SignatureAlgorithm::RsaPss => {
+                    use rsa::pss::Pss;
+                    let padding = match self.digest_algorithm {
+                        DigestAlgorithm::Sha256 => Pss::new::<sha2::Sha256>(),
+                        DigestAlgorithm::Sha384 => Pss::new::<sha2::Sha384>(),
+                        DigestAlgorithm::Sha512 => Pss::new::<sha2::Sha512>(),
+                        DigestAlgorithm::Sha3_256 => Pss::new::<sha3::Sha3_256>(),
+                        DigestAlgorithm::Sha3_384 => Pss::new::<sha3::Sha3_384>(),
+                        DigestAlgorithm::Sha3_512 => Pss::new::<sha3::Sha3_512>(),
+                    };
+                    key.sign(padding, hash)
+                        .map(|sig| sig.to_vec())
+                        .map_err(|e| CryptoError::SigningFailed(e.to_string()))
+                }
+                _ => {
+                    // Default: PKCS#1 v1.5
+                    // Note: SHA-3 digests don't have AssociatedOid in the sha3 crate,
+                    // so PKCS#1 v1.5 + SHA-3 is not directly supported. For SHA-3 digests,
+                    // we automatically fall back to RSA-PSS (there are no combined OIDs
+                    // for RSA PKCS#1v1.5 + SHA-3 anyway).
+                    if self.digest_algorithm.is_sha3() {
+                        use rsa::pss::Pss;
+                        let padding = match self.digest_algorithm {
+                            DigestAlgorithm::Sha3_256 => Pss::new::<sha3::Sha3_256>(),
+                            DigestAlgorithm::Sha3_384 => Pss::new::<sha3::Sha3_384>(),
+                            DigestAlgorithm::Sha3_512 => Pss::new::<sha3::Sha3_512>(),
+                            _ => unreachable!(),
+                        };
+                        key.sign(padding, hash)
+                            .map(|sig| sig.to_vec())
+                            .map_err(|e| CryptoError::SigningFailed(e.to_string()))
+                    } else {
+                        use rsa::Pkcs1v15Sign;
+                        let padding = match self.digest_algorithm {
+                            DigestAlgorithm::Sha256 => Pkcs1v15Sign::new::<sha2::Sha256>(),
+                            DigestAlgorithm::Sha384 => Pkcs1v15Sign::new::<sha2::Sha384>(),
+                            DigestAlgorithm::Sha512 => Pkcs1v15Sign::new::<sha2::Sha512>(),
+                            _ => unreachable!("SHA-3 handled above"),
+                        };
+                        key.sign(padding, hash)
+                            .map(|sig| sig.to_vec())
+                            .map_err(|e| CryptoError::SigningFailed(e.to_string()))
+                    }
+                }
+            },
             SigningKey::EcdsaP256(key) => {
                 use p256::ecdsa::signature::Signer;
                 let sig: p256::ecdsa::Signature = key.sign(hash);

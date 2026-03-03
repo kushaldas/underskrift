@@ -5,7 +5,7 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use josekit::jws::{JwsHeader, ES256, ES384, ES512, PS256, PS384, PS512, RS256, RS384, RS512};
 use josekit::jwt::{self, JwtPayload};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use super::algo;
 use super::claims::*;

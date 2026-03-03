@@ -33,6 +33,61 @@ use crate::error::CmsError;
 pub(crate) const ID_AA_CMS_ALGORITHM_PROTECTION: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.52");
 
+/// Build the RSASSA-PSS-params ASN.1 structure for a given digest algorithm.
+///
+/// Encodes the AlgorithmIdentifier parameters for RSASSA-PSS (RFC 4055):
+/// ```text
+/// RSASSA-PSS-params ::= SEQUENCE {
+///     hashAlgorithm      [0] HashAlgorithm DEFAULT sha1,
+///     maskGenAlgorithm    [1] MaskGenAlgorithm DEFAULT mgf1SHA1,
+///     saltLength          [2] INTEGER DEFAULT 20,
+///     trailerField        [3] TrailerField DEFAULT trailerFieldBC
+/// }
+/// ```
+/// Build the RSASSA-PSS-params ASN.1 Any value for a given digest algorithm.
+///
+/// This is `pub(crate)` so that `svt::embed` can reuse it for SVT CMS construction.
+pub(crate) fn rsassa_pss_params_any(digest: DigestAlgorithm) -> Result<Any, String> {
+    let digest_oid = digest.oid();
+    let salt_len: u32 = match digest {
+        DigestAlgorithm::Sha256 | DigestAlgorithm::Sha3_256 => 32,
+        DigestAlgorithm::Sha384 | DigestAlgorithm::Sha3_384 => 48,
+        DigestAlgorithm::Sha512 | DigestAlgorithm::Sha3_512 => 64,
+    };
+
+    // Encode the hash AlgorithmIdentifier: SEQUENCE { OID, NULL }
+    let digest_oid_bytes =
+        der::Encode::to_der(&digest_oid).map_err(|e| format!("digest OID encode: {e}"))?;
+    let hash_alg_id = encode_sequence(&[&digest_oid_bytes]);
+
+    // MGF AlgorithmIdentifier: SEQUENCE { id-mgf1 OID, hash AlgorithmIdentifier }
+    let mgf1_oid = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.8"); // id-mgf1
+    let mgf1_oid_bytes =
+        der::Encode::to_der(&mgf1_oid).map_err(|e| format!("MGF1 OID encode: {e}"))?;
+    let mgf_alg_id = encode_sequence(&[&mgf1_oid_bytes, &hash_alg_id]);
+
+    // Salt length: INTEGER
+    let salt_bytes = encode_integer(salt_len);
+
+    // Now build the params SEQUENCE with explicit context tags
+    // [0] EXPLICIT hashAlgorithm
+    let tagged_hash = encode_context_explicit(0, &hash_alg_id);
+    // [1] EXPLICIT maskGenAlgorithm
+    let tagged_mgf = encode_context_explicit(1, &mgf_alg_id);
+    // [2] EXPLICIT saltLength
+    let tagged_salt = encode_context_explicit(2, &salt_bytes);
+
+    let params_inner: &[&[u8]] = &[
+        tagged_hash.as_slice(),
+        tagged_mgf.as_slice(),
+        tagged_salt.as_slice(),
+    ];
+    let params_seq = encode_sequence(params_inner);
+
+    Any::new(Tag::Sequence, params_seq[2..].to_vec())
+        .map_err(|e| format!("RSASSA-PSS params Any: {e}"))
+}
+
 /// The mode of CMS construction — affects which signed attributes are included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmsProfile {
@@ -46,6 +101,30 @@ impl Default for CmsProfile {
     fn default() -> Self {
         Self::Pades
     }
+}
+
+/// Intermediate state from [`PdfCmsBuilder::pre_sign`] for deferred/remote signing.
+///
+/// Contains the hash that must be signed by the remote party (`attrs_hash`)
+/// and all the CMS structural components needed to assemble the final
+/// `SignedData` once the signature bytes are available.
+///
+/// This struct is opaque to callers — the only field they need is `attrs_hash`.
+/// Pass the whole struct back to [`PdfCmsBuilder::complete_cms`] along with
+/// the raw signature bytes to produce the final CMS DER.
+pub struct CmsPreSignData {
+    /// The hash of the DER-encoded signed attributes.
+    /// This is what must be signed by the remote/external signing key.
+    pub attrs_hash: Vec<u8>,
+
+    // -- internal CMS components (not part of public contract) --
+    pub(crate) sid: SignerIdentifier,
+    pub(crate) digest_alg: AlgorithmIdentifierOwned,
+    pub(crate) sig_alg: AlgorithmIdentifierOwned,
+    pub(crate) digest_algorithms: SetOfVec<AlgorithmIdentifierOwned>,
+    pub(crate) encap_content_info: EncapsulatedContentInfo,
+    pub(crate) signed_attrs: SetOfVec<Attribute>,
+    pub(crate) certificates: CertificateSet,
 }
 
 /// Builder for CMS SignedData structures suitable for PDF signatures.
@@ -209,6 +288,139 @@ impl<'a> PdfCmsBuilder<'a> {
             .map_err(|e| CmsError::Der(format!("failed to DER-encode ContentInfo: {e}")))
     }
 
+    /// Prepare a CMS SignedData for remote/deferred signing (phase 1 of 2).
+    ///
+    /// Builds everything except the actual cryptographic signature: parses the
+    /// signer certificate, constructs signed attributes (including `messageDigest`
+    /// with the `data_hash`), DER-encodes them, and computes the hash that must
+    /// be signed by the remote party.
+    ///
+    /// Returns a [`CmsPreSignData`] containing:
+    /// - `attrs_hash`: the hash to send to the remote signer
+    /// - Internal state needed by [`complete_cms`] to finish the CMS
+    ///
+    /// The caller should sign `attrs_hash` using the private key corresponding
+    /// to the signer certificate, then call [`complete_cms`] with the result.
+    ///
+    /// # Example (three-phase flow)
+    ///
+    /// ```ignore
+    /// let builder = PdfCmsBuilder::new(&signer_info).profile(CmsProfile::Pades);
+    /// let pre = builder.pre_sign(data_hash)?;
+    ///
+    /// // Send pre.attrs_hash to remote signing service...
+    /// let signature_bytes = remote_sign(&pre.attrs_hash);
+    ///
+    /// let cms_der = builder.complete_cms(&pre, &signature_bytes)?;
+    /// ```
+    pub fn pre_sign(&self, data_hash: &[u8]) -> Result<CmsPreSignData, CmsError> {
+        // 1. Parse the signer's certificate
+        let cert_der = self.signer.certificate_der();
+        let cert = Certificate::from_der(cert_der)
+            .map_err(|e| CmsError::Der(format!("failed to parse signer certificate: {e}")))?;
+
+        // 2. Build SignerIdentifier
+        let sid = SignerIdentifier::IssuerAndSerialNumber(IssuerAndSerialNumber {
+            issuer: cert.tbs_certificate.issuer.clone(),
+            serial_number: cert.tbs_certificate.serial_number.clone(),
+        });
+
+        // 3. Determine algorithm identifiers
+        let digest_alg = self.digest_algorithm_identifier();
+        let sig_alg = self.signature_algorithm_identifier()?;
+
+        // 4. Build digest algorithm set
+        let mut digest_algorithms = SetOfVec::new();
+        digest_algorithms
+            .insert(digest_alg.clone())
+            .map_err(|e| CmsError::Builder(format!("failed to build digest algorithm set: {e}")))?;
+
+        // 5. Build EncapsulatedContentInfo (detached)
+        let encap_content_info = EncapsulatedContentInfo {
+            econtent_type: rfc5911::ID_DATA,
+            econtent: None,
+        };
+
+        // 6. Build signed attributes
+        let signed_attrs = self.build_signed_attributes(data_hash, &cert)?;
+
+        // 7. DER-encode signed attributes and compute the hash-to-sign
+        let attrs_to_sign = self.encode_attrs_for_signing(&signed_attrs)?;
+        let attrs_hash = self.signer.digest_algorithm().digest(&attrs_to_sign);
+
+        // 8. Build the certificate set (needed for complete_cms)
+        let certificates = self.build_certificate_set()?;
+
+        Ok(CmsPreSignData {
+            attrs_hash,
+            sid,
+            digest_alg,
+            sig_alg,
+            digest_algorithms,
+            encap_content_info,
+            signed_attrs,
+            certificates,
+        })
+    }
+
+    /// Complete a CMS SignedData using a pre-computed signature (phase 2 of 2).
+    ///
+    /// Takes the [`CmsPreSignData`] from [`pre_sign`] and the raw signature
+    /// bytes produced by signing `pre_sign_data.attrs_hash` with the private key.
+    ///
+    /// Returns the DER-encoded `ContentInfo` wrapping the `SignedData`, ready
+    /// to inject into a PDF `/Contents` field.
+    pub fn complete_cms(
+        &self,
+        pre: &CmsPreSignData,
+        signature_bytes: &[u8],
+    ) -> Result<Vec<u8>, CmsError> {
+        // 1. Build SignerInfo with the externally-produced signature
+        let signer_info = SignerInfo {
+            version: CmsVersion::V1,
+            sid: pre.sid.clone(),
+            digest_alg: pre.digest_alg.clone(),
+            signed_attrs: Some(pre.signed_attrs.clone()),
+            signature_algorithm: pre.sig_alg.clone(),
+            signature: OctetString::new(signature_bytes.to_vec()).map_err(|e| {
+                CmsError::Der(format!("failed to create signature octet string: {e}"))
+            })?,
+            unsigned_attrs: None,
+        };
+
+        let mut signer_infos_set = SetOfVec::new();
+        signer_infos_set
+            .insert(signer_info)
+            .map_err(|e| CmsError::Builder(format!("failed to build signer infos set: {e}")))?;
+
+        // 2. Assemble SignedData
+        let signed_data = SignedData {
+            version: CmsVersion::V1,
+            digest_algorithms: pre.digest_algorithms.clone(),
+            encap_content_info: pre.encap_content_info.clone(),
+            certificates: Some(pre.certificates.clone()),
+            crls: None,
+            signer_infos: SignerInfos(signer_infos_set),
+        };
+
+        // 3. Wrap in ContentInfo and DER-encode
+        let signed_data_der = signed_data
+            .to_der()
+            .map_err(|e| CmsError::Der(format!("failed to DER-encode SignedData: {e}")))?;
+
+        let content = Any::from_der(&signed_data_der)
+            .map_err(|e| CmsError::Der(format!("failed to re-parse SignedData as Any: {e}")))?;
+
+        let content_info = ContentInfo {
+            content_type: rfc5911::ID_SIGNED_DATA,
+            content,
+        };
+
+        content_info
+            .to_der()
+            .map_err(|e| CmsError::Der(format!("failed to DER-encode ContentInfo: {e}")))
+    }
+
     /// Build the signed attributes set.
     ///
     /// Always includes:
@@ -351,6 +563,9 @@ impl<'a> PdfCmsBuilder<'a> {
             DigestAlgorithm::Sha256 => rfc5912::ID_SHA_256,
             DigestAlgorithm::Sha384 => rfc5912::ID_SHA_384,
             DigestAlgorithm::Sha512 => rfc5912::ID_SHA_512,
+            DigestAlgorithm::Sha3_256 => crate::crypto::algorithm::OID_SHA3_256,
+            DigestAlgorithm::Sha3_384 => crate::crypto::algorithm::OID_SHA3_384,
+            DigestAlgorithm::Sha3_512 => crate::crypto::algorithm::OID_SHA3_512,
         };
         AlgorithmIdentifierOwned {
             oid,
@@ -360,6 +575,8 @@ impl<'a> PdfCmsBuilder<'a> {
 
     /// Get the AlgorithmIdentifier for the signature algorithm.
     fn signature_algorithm_identifier(&self) -> Result<AlgorithmIdentifierOwned, CmsError> {
+        use crate::crypto::algorithm::OID_RSASSA_PSS;
+
         let (oid, parameters) = match (
             self.signer.signature_algorithm(),
             self.signer.digest_algorithm(),
@@ -380,13 +597,22 @@ impl<'a> PdfCmsBuilder<'a> {
                     .map_err(|e| CmsError::Der(format!("failed to create NULL Any: {e}")))?;
                 (rfc5912::SHA_512_WITH_RSA_ENCRYPTION, Some(null_any))
             }
+            (SignatureAlgorithm::RsaPkcs1v15, digest) => {
+                // RSA PKCS#1 v1.5 with SHA-3 — uses the same RSA OID pattern
+                // but SHA-3 doesn't have dedicated rsaEncryption+sha3 combined OIDs.
+                // Fall back to RSASSA-PSS with explicit parameters for SHA-3.
+                let params = rsassa_pss_params_any(digest)
+                    .map_err(|e| CmsError::Der(format!("RSA-PSS params: {e}")))?;
+                (OID_RSASSA_PSS, Some(params))
+            }
+            (SignatureAlgorithm::RsaPss, digest) => {
+                let params = rsassa_pss_params_any(digest)
+                    .map_err(|e| CmsError::Der(format!("RSA-PSS params: {e}")))?;
+                (OID_RSASSA_PSS, Some(params))
+            }
             (SignatureAlgorithm::EcdsaP256, _) => (rfc5912::ECDSA_WITH_SHA_256, None),
             (SignatureAlgorithm::EcdsaP384, _) => (rfc5912::ECDSA_WITH_SHA_384, None),
-            (alg, digest) => {
-                return Err(CmsError::UnsupportedAlgorithm(format!(
-                    "unsupported algorithm combination: {alg:?} with {digest:?}"
-                )));
-            }
+            (SignatureAlgorithm::Ed25519, _) => (crate::crypto::algorithm::OID_ED25519, None),
         };
 
         Ok(AlgorithmIdentifierOwned { oid, parameters })
@@ -674,6 +900,27 @@ fn length_bytes(len: usize) -> usize {
     } else {
         5
     }
+}
+
+/// Encode a small unsigned integer as DER INTEGER.
+fn encode_integer(val: u32) -> Vec<u8> {
+    if val == 0 {
+        return vec![0x02, 0x01, 0x00];
+    }
+    let bytes = val.to_be_bytes();
+    // Skip leading zeros
+    let start = bytes.iter().position(|&b| b != 0).unwrap_or(3);
+    let significant = &bytes[start..];
+    // If high bit set, prepend a zero byte
+    let needs_pad = significant[0] & 0x80 != 0;
+    let len = significant.len() + if needs_pad { 1 } else { 0 };
+    let mut out = vec![0x02]; // INTEGER tag
+    encode_length(&mut out, len);
+    if needs_pad {
+        out.push(0x00);
+    }
+    out.extend_from_slice(significant);
+    out
 }
 
 #[cfg(test)]

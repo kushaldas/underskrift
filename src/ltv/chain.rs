@@ -263,7 +263,6 @@ mod tests {
         ));
 
         let (_label, ca_der) = pem_rfc7468::decode_vec(ca_pem.as_bytes()).unwrap();
-        let ca_cert = Certificate::from_der(&ca_der).unwrap();
 
         let (_label, signer_der) = pem_rfc7468::decode_vec(signer_pem.as_bytes()).unwrap();
         let signer_cert = Certificate::from_der(&signer_der).unwrap();
@@ -281,7 +280,7 @@ mod tests {
         let mut available_certs = vec![signer_cert.clone()];
 
         // Parse chain PEM which may contain intermediate certs
-        let mut pem_data = chain_pem.as_bytes();
+        let pem_data = chain_pem.as_bytes();
         while let Ok((_label, der)) = pem_rfc7468::decode_vec(pem_data) {
             if let Ok(cert) = Certificate::from_der(&der) {
                 available_certs.push(cert);

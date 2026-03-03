@@ -10,6 +10,11 @@ pub const DIGEST_SHA256: &str = "http://www.w3.org/2001/04/xmlenc#sha256";
 pub const DIGEST_SHA384: &str = "http://www.w3.org/2001/04/xmldsig-more#sha384";
 pub const DIGEST_SHA512: &str = "http://www.w3.org/2001/04/xmlenc#sha512";
 
+/// SHA-3 digest algorithm URI constants (W3C XML Digital Signatures).
+pub const DIGEST_SHA3_256: &str = "http://www.w3.org/2007/05/xmldsig-more#sha3-256";
+pub const DIGEST_SHA3_384: &str = "http://www.w3.org/2007/05/xmldsig-more#sha3-384";
+pub const DIGEST_SHA3_512: &str = "http://www.w3.org/2007/05/xmldsig-more#sha3-512";
+
 /// JWS algorithm name constants.
 pub const ALG_RS256: &str = "RS256";
 pub const ALG_RS384: &str = "RS384";
@@ -20,6 +25,8 @@ pub const ALG_PS512: &str = "PS512";
 pub const ALG_ES256: &str = "ES256";
 pub const ALG_ES384: &str = "ES384";
 pub const ALG_ES512: &str = "ES512";
+/// EdDSA (Ed25519/Ed448) JWS algorithm name.
+pub const ALG_EDDSA: &str = "EdDSA";
 
 /// Properties for a supported SVT algorithm.
 #[derive(Debug, Clone)]
@@ -68,6 +75,11 @@ static ALGO_REGISTRY: &[AlgoProperties] = &[
         jws_algo: ALG_ES512,
         digest_algo_uri: DIGEST_SHA512,
     },
+    // EdDSA uses SHA-512 internally for Ed25519 (per RFC 8032)
+    AlgoProperties {
+        jws_algo: ALG_EDDSA,
+        digest_algo_uri: DIGEST_SHA512,
+    },
 ];
 
 /// Look up the algorithm properties for a JWS algorithm name.
@@ -93,6 +105,18 @@ pub fn hash_with_uri(digest_uri: &str, data: &[u8]) -> Result<Vec<u8>, SvtError>
         DIGEST_SHA256 => Ok(Sha256::digest(data).to_vec()),
         DIGEST_SHA384 => Ok(Sha384::digest(data).to_vec()),
         DIGEST_SHA512 => Ok(Sha512::digest(data).to_vec()),
+        DIGEST_SHA3_256 => {
+            use sha3::Sha3_256;
+            Ok(Sha3_256::digest(data).to_vec())
+        }
+        DIGEST_SHA3_384 => {
+            use sha3::Sha3_384;
+            Ok(Sha3_384::digest(data).to_vec())
+        }
+        DIGEST_SHA3_512 => {
+            use sha3::Sha3_512;
+            Ok(Sha3_512::digest(data).to_vec())
+        }
         _ => Err(SvtError::UnsupportedAlgorithm(format!(
             "unsupported digest URI: {digest_uri}"
         ))),
@@ -113,7 +137,7 @@ mod tests {
     fn test_all_algos_supported() {
         for name in [
             ALG_RS256, ALG_RS384, ALG_RS512, ALG_PS256, ALG_PS384, ALG_PS512, ALG_ES256, ALG_ES384,
-            ALG_ES512,
+            ALG_ES512, ALG_EDDSA,
         ] {
             assert!(is_supported(name), "expected {name} to be supported");
         }
@@ -121,8 +145,8 @@ mod tests {
 
     #[test]
     fn test_unsupported_algo() {
-        assert!(!is_supported("EdDSA"));
-        assert!(digest_uri_for_jws("EdDSA").is_err());
+        assert!(!is_supported("NONE"));
+        assert!(digest_uri_for_jws("NONE").is_err());
     }
 
     #[test]
@@ -159,6 +183,29 @@ mod tests {
     fn test_hash_with_unsupported_uri() {
         let r = hash_with_uri("http://example.com/unsupported", b"hello");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_hash_with_uri_sha3_256() {
+        let hash = hash_with_uri(DIGEST_SHA3_256, b"hello").unwrap();
+        assert_eq!(hash.len(), 32);
+    }
+
+    #[test]
+    fn test_hash_with_uri_sha3_384() {
+        let hash = hash_with_uri(DIGEST_SHA3_384, b"hello").unwrap();
+        assert_eq!(hash.len(), 48);
+    }
+
+    #[test]
+    fn test_hash_with_uri_sha3_512() {
+        let hash = hash_with_uri(DIGEST_SHA3_512, b"hello").unwrap();
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_eddsa_digest_uri() {
+        assert_eq!(digest_uri_for_jws(ALG_EDDSA).unwrap(), DIGEST_SHA512);
     }
 
     #[test]

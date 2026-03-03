@@ -407,10 +407,11 @@ fn build_digest_alg_id(alg: DigestAlgorithm) -> AlgorithmIdentifierOwned {
 }
 
 fn build_sig_alg_id(signer: &dyn CryptoSigner) -> Result<AlgorithmIdentifierOwned, SvtError> {
-    use crate::crypto::algorithm::SignatureAlgorithm;
+    use crate::crypto::algorithm::{SignatureAlgorithm, OID_ED25519, OID_RSASSA_PSS};
     use const_oid::db::rfc5912;
 
     let (oid, parameters) = match (signer.signature_algorithm(), signer.digest_algorithm()) {
+        // RSA PKCS#1 v1.5 with SHA-2
         (SignatureAlgorithm::RsaPkcs1v15, DigestAlgorithm::Sha256) => {
             let null_any = Any::new(Tag::Null, Vec::new())
                 .map_err(|e| SvtError::Embedding(format!("failed to create NULL Any: {e}")))?;
@@ -426,8 +427,23 @@ fn build_sig_alg_id(signer: &dyn CryptoSigner) -> Result<AlgorithmIdentifierOwne
                 .map_err(|e| SvtError::Embedding(format!("failed to create NULL Any: {e}")))?;
             (rfc5912::SHA_512_WITH_RSA_ENCRYPTION, Some(null_any))
         }
+        // RSA PKCS#1 v1.5 with SHA-3 → fall back to RSA-PSS (no combined OIDs exist)
+        (SignatureAlgorithm::RsaPkcs1v15, digest) if digest.is_sha3() => {
+            let params = crate::cms::builder::rsassa_pss_params_any(digest)
+                .map_err(|e| SvtError::Embedding(format!("RSA-PSS params: {e}")))?;
+            (OID_RSASSA_PSS, Some(params))
+        }
+        // RSA-PSS (explicit)
+        (SignatureAlgorithm::RsaPss, digest) => {
+            let params = crate::cms::builder::rsassa_pss_params_any(digest)
+                .map_err(|e| SvtError::Embedding(format!("RSA-PSS params: {e}")))?;
+            (OID_RSASSA_PSS, Some(params))
+        }
+        // ECDSA
         (SignatureAlgorithm::EcdsaP256, _) => (rfc5912::ECDSA_WITH_SHA_256, None),
         (SignatureAlgorithm::EcdsaP384, _) => (rfc5912::ECDSA_WITH_SHA_384, None),
+        // Ed25519
+        (SignatureAlgorithm::Ed25519, _) => (OID_ED25519, None),
         (alg, digest) => {
             return Err(SvtError::Embedding(format!(
                 "unsupported algorithm combination: {alg:?} with {digest:?}"

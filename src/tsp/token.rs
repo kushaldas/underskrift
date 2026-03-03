@@ -558,17 +558,8 @@ fn parse_message_imprint(body: &[u8]) -> Result<(DigestAlgorithm, Vec<u8>), TspE
 
 /// Map an OID to our DigestAlgorithm enum.
 fn oid_to_digest_algorithm(oid: &ObjectIdentifier) -> Result<DigestAlgorithm, TspError> {
-    if *oid == DigestAlgorithm::Sha256.oid() {
-        Ok(DigestAlgorithm::Sha256)
-    } else if *oid == DigestAlgorithm::Sha384.oid() {
-        Ok(DigestAlgorithm::Sha384)
-    } else if *oid == DigestAlgorithm::Sha512.oid() {
-        Ok(DigestAlgorithm::Sha512)
-    } else {
-        Err(TspError::InvalidResponse(format!(
-            "unsupported hash algorithm OID: {oid}"
-        )))
-    }
+    DigestAlgorithm::from_oid(oid)
+        .ok_or_else(|| TspError::InvalidResponse(format!("unsupported hash algorithm OID: {oid}")))
 }
 
 /// Build an AlgorithmIdentifier for a digest algorithm.

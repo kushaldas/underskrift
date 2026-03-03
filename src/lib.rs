@@ -31,6 +31,7 @@ pub mod cms;
 pub mod crypto;
 pub mod der_utils;
 pub mod error;
+pub mod remote;
 pub mod signer;
 pub mod trust;
 
@@ -65,11 +66,26 @@ pub use error::PdfSignError;
 pub use signer::{PdfSigner, SigningOptions, PadesLevel, SubFilter};
 pub use crypto::traits::CryptoSigner;
 pub use crypto::software::SoftwareSigner;
-pub use crypto::algorithm::{DigestAlgorithm, SignatureAlgorithm};
+pub use crypto::algorithm::{AlgorithmRegistry, DigestAlgorithm, SignatureAlgorithm};
 pub use core::doc_timestamp::DocTimestampOptions;
+
+pub use remote::{
+    prepare_signature, finalize_signature,
+    PreparedSignature, RemoteSignerInfo, RemoteSigningOptions,
+};
 
 #[cfg(feature = "tsp")]
 pub use core::doc_timestamp::{add_document_timestamp, add_document_timestamp_pool};
 
 #[cfg(feature = "verify")]
 pub use verify::SignatureVerifier;
+
+#[cfg(feature = "visual")]
+pub use visual::{
+    VisibleSignatureConfig, SignatureRect, SignatureLayout, TextConfig,
+    TextLine, FontSpec, Standard14Font, Measurement, TextAlignment,
+    Color, Border, Arrangement, AppearanceStream,
+    build_appearance, build_default_text_appearance, build_text_appearance,
+    ImageConfig, ImageFormat, ImageScale,
+    prepare_image, EmbeddedImage,
+};

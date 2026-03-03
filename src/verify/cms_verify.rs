@@ -8,7 +8,6 @@
 use cms::content_info::ContentInfo;
 use cms::signed_data::{SignedData, SignerIdentifier, SignerInfo};
 use const_oid::db::rfc5911;
-use const_oid::db::rfc5912;
 use const_oid::ObjectIdentifier;
 use der::asn1::OctetString;
 use der::{Decode, Encode};
@@ -1128,6 +1127,7 @@ fn verify_cms_signature(
     signature: &[u8],
     spki_der: &[u8],
 ) -> Result<(), VerifyError> {
+    use crate::crypto::algorithm::{OID_ED25519, OID_RSASSA_PSS};
     use const_oid::db;
 
     if *sig_alg_oid == db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION {
@@ -1136,10 +1136,19 @@ fn verify_cms_signature(
         verify_rsa_cms::<sha2::Sha384>(data, signature, spki_der)
     } else if *sig_alg_oid == db::rfc5912::SHA_512_WITH_RSA_ENCRYPTION {
         verify_rsa_cms::<sha2::Sha512>(data, signature, spki_der)
+    } else if *sig_alg_oid == OID_RSASSA_PSS {
+        // RSA-PSS: try SHA-256 first (most common), then SHA-384, SHA-512.
+        // In a production setting, the AlgorithmIdentifier parameters would
+        // specify the hash algorithm; for now we attempt each.
+        verify_rsa_pss_cms::<sha2::Sha256>(data, signature, spki_der)
+            .or_else(|_| verify_rsa_pss_cms::<sha2::Sha384>(data, signature, spki_der))
+            .or_else(|_| verify_rsa_pss_cms::<sha2::Sha512>(data, signature, spki_der))
     } else if *sig_alg_oid == db::rfc5912::ECDSA_WITH_SHA_256 {
         verify_ecdsa_p256_cms(data, signature, spki_der)
     } else if *sig_alg_oid == db::rfc5912::ECDSA_WITH_SHA_384 {
         verify_ecdsa_p384_cms(data, signature, spki_der)
+    } else if *sig_alg_oid == OID_ED25519 {
+        verify_ed25519_cms(data, signature, spki_der)
     } else {
         Err(VerifyError::CmsVerification(format!(
             "unsupported signature algorithm: {sig_alg_oid}"
@@ -1206,17 +1215,48 @@ fn verify_ecdsa_p384_cms(
         .map_err(|e| VerifyError::CmsVerification(format!("ECDSA P-384 invalid: {e}")))
 }
 
+fn verify_rsa_pss_cms<
+    D: digest::Digest + digest::FixedOutputReset + Default + Clone + Send + Sync + 'static,
+>(
+    data: &[u8],
+    signature: &[u8],
+    spki_der: &[u8],
+) -> Result<(), VerifyError> {
+    use rsa::pss::Pss;
+    use rsa::RsaPublicKey;
+    use spki::SubjectPublicKeyInfoRef;
+
+    let spki = SubjectPublicKeyInfoRef::from_der(spki_der)
+        .map_err(|e| VerifyError::CmsVerification(format!("SPKI decode failed: {e}")))?;
+    let pub_key = RsaPublicKey::try_from(spki)
+        .map_err(|e| VerifyError::CmsVerification(format!("RSA key decode failed: {e}")))?;
+
+    let hash = D::digest(data);
+    let scheme = Pss::new::<D>();
+    pub_key
+        .verify(scheme, &hash, signature)
+        .map_err(|e| VerifyError::CmsVerification(format!("RSA-PSS signature invalid: {e}")))
+}
+
+fn verify_ed25519_cms(data: &[u8], signature: &[u8], spki_der: &[u8]) -> Result<(), VerifyError> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    // Ed25519 public key is 32 bytes; extract from SPKI
+    let spki = spki::SubjectPublicKeyInfoRef::from_der(spki_der)
+        .map_err(|e| VerifyError::CmsVerification(format!("SPKI decode failed: {e}")))?;
+    let key_bytes = spki.subject_public_key.raw_bytes();
+    let vk = VerifyingKey::try_from(key_bytes)
+        .map_err(|e| VerifyError::CmsVerification(format!("Ed25519 key decode failed: {e}")))?;
+    let sig = Signature::from_slice(signature)
+        .map_err(|e| VerifyError::CmsVerification(format!("Ed25519 sig decode failed: {e}")))?;
+
+    vk.verify(data, &sig)
+        .map_err(|e| VerifyError::CmsVerification(format!("Ed25519 signature invalid: {e}")))
+}
+
 /// Map an OID to our DigestAlgorithm enum.
 fn oid_to_digest_algorithm(oid: &const_oid::ObjectIdentifier) -> Option<DigestAlgorithm> {
-    if *oid == rfc5912::ID_SHA_256 {
-        Some(DigestAlgorithm::Sha256)
-    } else if *oid == rfc5912::ID_SHA_384 {
-        Some(DigestAlgorithm::Sha384)
-    } else if *oid == rfc5912::ID_SHA_512 {
-        Some(DigestAlgorithm::Sha512)
-    } else {
-        None
-    }
+    DigestAlgorithm::from_oid(oid)
 }
 
 /// Compute the DTBSR (Data To Be Signed Representation) hash.
@@ -1255,6 +1295,7 @@ fn compute_dtbsr_hash(signer_info: &SignerInfo, digest_alg: &Option<DigestAlgori
 mod tests {
     use super::*;
     use chrono::{Datelike, Timelike};
+    use const_oid::db::rfc5912;
 
     #[test]
     fn test_oid_to_digest_algorithm() {
@@ -1332,7 +1373,6 @@ mod tests {
 
     #[test]
     fn test_parse_cms_algorithm_protection_roundtrip() {
-        use crate::cms::builder::ID_AA_CMS_ALGORITHM_PROTECTION;
         use der::{Any, Tag};
         use spki::AlgorithmIdentifierOwned;
 
@@ -1364,7 +1404,6 @@ mod tests {
 
     #[test]
     fn test_parse_cms_algorithm_protection_ecdsa() {
-        use der::{Any, Tag};
         use spki::AlgorithmIdentifierOwned;
 
         // Build CMS-AP with ECDSA
@@ -1787,7 +1826,7 @@ mod tests {
 
     #[test]
     fn test_chrono_to_der_datetime_basic() {
-        use chrono::{Datelike, TimeZone, Timelike};
+        use chrono::TimeZone;
         let dt = chrono::Utc
             .with_ymd_and_hms(2025, 6, 15, 14, 30, 45)
             .unwrap();

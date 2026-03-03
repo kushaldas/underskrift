@@ -1428,7 +1428,7 @@ mod tests {
     #[test]
     fn test_vo_deduplication_across_signatures() {
         // Two signatures sharing the same signer cert should produce one cert VO
-        let mut sig1 = make_full_sig_result("Sig1");
+        let sig1 = make_full_sig_result("Sig1");
         let mut sig2 = make_full_sig_result("Sig2");
         // Make them share the same signer cert
         sig2.signer_cert_der = sig1.signer_cert_der.clone();

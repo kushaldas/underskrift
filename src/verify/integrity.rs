@@ -124,33 +124,15 @@ pub fn compute_byte_range_hash(
     byte_range: &[usize; 4],
     digest_alg: DigestAlgorithm,
 ) -> Vec<u8> {
-    use sha2::Digest;
-
     let [offset1, length1, offset2, length2] = *byte_range;
 
     let range1 = &pdf_data[offset1..offset1 + length1];
     let range2 = &pdf_data[offset2..offset2 + length2];
 
-    match digest_alg {
-        DigestAlgorithm::Sha256 => {
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(range1);
-            hasher.update(range2);
-            hasher.finalize().to_vec()
-        }
-        DigestAlgorithm::Sha384 => {
-            let mut hasher = sha2::Sha384::new();
-            hasher.update(range1);
-            hasher.update(range2);
-            hasher.finalize().to_vec()
-        }
-        DigestAlgorithm::Sha512 => {
-            let mut hasher = sha2::Sha512::new();
-            hasher.update(range1);
-            hasher.update(range2);
-            hasher.finalize().to_vec()
-        }
-    }
+    let mut hasher = digest_alg.new_hasher();
+    hasher.update(range1);
+    hasher.update(range2);
+    hasher.finalize()
 }
 
 /// Check whether a signed PDF has been modified after the last signature.

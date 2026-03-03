@@ -5,9 +5,12 @@
 //!
 //! Supports:
 //! - RSA PKCS#1 v1.5 with SHA-256, SHA-384, SHA-512
+//! - RSA-PSS (RSASSA-PSS) with SHA-256, SHA-384, SHA-512
 //! - ECDSA P-256 with SHA-256
 //! - ECDSA P-384 with SHA-384
+//! - Ed25519
 
+use crate::crypto::algorithm::{OID_ED25519, OID_RSASSA_PSS};
 use crate::error::TrustError;
 
 /// Verify a raw signature over `tbs_bytes` using the signer's SPKI (DER)
@@ -23,8 +26,10 @@ use crate::error::TrustError;
 /// | `1.2.840.113549.1.1.11` | SHA-256 with RSA |
 /// | `1.2.840.113549.1.1.12` | SHA-384 with RSA |
 /// | `1.2.840.113549.1.1.13` | SHA-512 with RSA |
+/// | `1.2.840.113549.1.1.10` | RSASSA-PSS (tries SHA-256/384/512) |
 /// | `1.2.840.10045.4.3.2`   | ECDSA with SHA-256 |
 /// | `1.2.840.10045.4.3.3`   | ECDSA with SHA-384 |
+/// | `1.3.101.112`           | Ed25519 |
 pub fn verify_signature_by_oid(
     tbs_bytes: &[u8],
     signature_bytes: &[u8],
@@ -39,10 +44,22 @@ pub fn verify_signature_by_oid(
         verify_rsa_signature::<sha2::Sha384>(tbs_bytes, signature_bytes, spki_der)
     } else if *sig_alg_oid == db::rfc5912::SHA_512_WITH_RSA_ENCRYPTION {
         verify_rsa_signature::<sha2::Sha512>(tbs_bytes, signature_bytes, spki_der)
+    } else if *sig_alg_oid == OID_RSASSA_PSS {
+        // RSA-PSS: AlgorithmIdentifier parameters should specify the hash,
+        // but here we only have the OID. Try SHA-256 first, then SHA-384, SHA-512.
+        verify_rsa_pss_signature::<sha2::Sha256>(tbs_bytes, signature_bytes, spki_der)
+            .or_else(|_| {
+                verify_rsa_pss_signature::<sha2::Sha384>(tbs_bytes, signature_bytes, spki_der)
+            })
+            .or_else(|_| {
+                verify_rsa_pss_signature::<sha2::Sha512>(tbs_bytes, signature_bytes, spki_der)
+            })
     } else if *sig_alg_oid == db::rfc5912::ECDSA_WITH_SHA_256 {
         verify_ecdsa_p256_signature(tbs_bytes, signature_bytes, spki_der)
     } else if *sig_alg_oid == db::rfc5912::ECDSA_WITH_SHA_384 {
         verify_ecdsa_p384_signature(tbs_bytes, signature_bytes, spki_der)
+    } else if *sig_alg_oid == OID_ED25519 {
+        verify_ed25519_signature(tbs_bytes, signature_bytes, spki_der)
     } else {
         Err(TrustError::UnsupportedAlgorithm(format!(
             "signature algorithm OID: {sig_alg_oid}"
@@ -99,6 +116,31 @@ pub fn verify_rsa_signature<D: digest::Digest + const_oid::AssociatedOid>(
         .map_err(|e| TrustError::SignatureVerification(format!("RSA signature invalid: {e}")))
 }
 
+/// Verify an RSA-PSS (RSASSA-PSS) signature over `tbs` using the given SPKI.
+pub fn verify_rsa_pss_signature<
+    D: digest::Digest + digest::FixedOutputReset + Default + Clone + Send + Sync + 'static,
+>(
+    tbs: &[u8],
+    sig: &[u8],
+    spki_der: &[u8],
+) -> Result<(), TrustError> {
+    use der::Decode;
+    use rsa::pss::Pss;
+    use rsa::RsaPublicKey;
+    use spki::SubjectPublicKeyInfoRef;
+
+    let spki = SubjectPublicKeyInfoRef::from_der(spki_der)
+        .map_err(|e| TrustError::SignatureVerification(format!("SPKI decode failed: {e}")))?;
+    let pub_key = RsaPublicKey::try_from(spki)
+        .map_err(|e| TrustError::SignatureVerification(format!("RSA key decode failed: {e}")))?;
+
+    let hash = D::digest(tbs);
+    let scheme = Pss::new::<D>();
+    pub_key
+        .verify(scheme, &hash, sig)
+        .map_err(|e| TrustError::SignatureVerification(format!("RSA-PSS signature invalid: {e}")))
+}
+
 /// Verify an ECDSA P-256 (SHA-256) signature.
 pub fn verify_ecdsa_p256_signature(
     tbs: &[u8],
@@ -139,6 +181,23 @@ pub fn verify_ecdsa_p384_signature(
 
     vk.verify(tbs, &signature)
         .map_err(|e| TrustError::SignatureVerification(format!("ECDSA P-384 invalid: {e}")))
+}
+
+/// Verify an Ed25519 signature.
+pub fn verify_ed25519_signature(tbs: &[u8], sig: &[u8], spki_der: &[u8]) -> Result<(), TrustError> {
+    use der::Decode;
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let spki = spki::SubjectPublicKeyInfoRef::from_der(spki_der)
+        .map_err(|e| TrustError::SignatureVerification(format!("SPKI decode failed: {e}")))?;
+    let key_bytes = spki.subject_public_key.raw_bytes();
+    let vk = VerifyingKey::try_from(key_bytes)
+        .map_err(|e| TrustError::SignatureVerification(format!("Ed25519 key decode: {e}")))?;
+    let signature = Signature::from_slice(sig)
+        .map_err(|e| TrustError::SignatureVerification(format!("Ed25519 sig decode: {e}")))?;
+
+    vk.verify(tbs, &signature)
+        .map_err(|e| TrustError::SignatureVerification(format!("Ed25519 invalid: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +285,32 @@ mod tests {
         assert!(
             err_msg.contains("unsupported"),
             "error should mention unsupported: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_rsassa_pss_oid_dispatches() {
+        // Even with bad data, the RSA-PSS branch should be reached (not "unsupported")
+        let pss_oid = OID_RSASSA_PSS;
+        let result = verify_signature_by_oid(b"tbs", b"sig", b"bad_spki", &pss_oid);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        // Should fail at SPKI decode, not "unsupported algorithm"
+        assert!(
+            !err_msg.contains("unsupported"),
+            "RSA-PSS should be dispatched, not unsupported: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_ed25519_oid_dispatches() {
+        let ed_oid = OID_ED25519;
+        let result = verify_signature_by_oid(b"tbs", b"sig", b"bad_spki", &ed_oid);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("unsupported"),
+            "Ed25519 should be dispatched, not unsupported: {err_msg}"
         );
     }
 }

@@ -49,6 +49,12 @@ pub enum PdfSignError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Algorithm not allowed: {0}")]
+    AlgorithmNotAllowed(String),
+
+    #[error("Visual signature error: {0}")]
+    Visual(#[from] VisualError),
 }
 
 /// Errors from the `core` module — PDF structure manipulation.
@@ -316,4 +322,20 @@ pub enum ReportError {
 
     #[error("unsupported report option: {0}")]
     UnsupportedOption(String),
+}
+
+/// Errors from the `visual` module — visible signature appearance generation.
+#[derive(Debug, Error)]
+pub enum VisualError {
+    #[error("invalid signature dimensions: {0}")]
+    InvalidDimensions(String),
+
+    #[error("image processing error: {0}")]
+    ImageError(String),
+
+    #[error("font error: {0}")]
+    FontError(String),
+
+    #[error("appearance generation error: {0}")]
+    AppearanceError(String),
 }

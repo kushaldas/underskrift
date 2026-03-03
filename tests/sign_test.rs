@@ -179,3 +179,164 @@ async fn test_sign_writes_valid_output_file() {
 
     println!("File I/O test passed. Written to: {:?}", tmp.path());
 }
+
+#[tokio::test]
+async fn test_sign_pdf_with_visible_signature() {
+    use underskrift::{
+        VisibleSignatureConfig, SignatureRect, SignatureLayout,
+        TextConfig, TextLine, Color, Border,
+    };
+
+    let pdf = test_pdf();
+    let signer = test_signer();
+
+    let vis_config = VisibleSignatureConfig {
+        page: 0,
+        rect: SignatureRect::Absolute {
+            llx: 50.0,
+            lly: 700.0,
+            urx: 250.0,
+            ury: 750.0,
+        },
+        layout: SignatureLayout::TextOnly(TextConfig {
+            lines: vec![
+                TextLine::new("Digitally signed by Test User").bold(),
+                TextLine::new("Reason: Integration test"),
+                TextLine::new("Date: 2026-03-03"),
+            ],
+            font_size: 8.0,
+            ..TextConfig::default()
+        }),
+        background_color: Some(Color::white()),
+        border: Some(Border::default()),
+    };
+
+    let signed = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "VisibleSig1".to_string(),
+            reason: Some("Visible signature test".to_string()),
+            location: Some("Test Lab".to_string()),
+            visible_signature: Some(vis_config),
+            ..Default::default()
+        })
+        .sign(&pdf, &signer)
+        .await
+        .expect("signing with visible signature failed");
+
+    assert!(signed.len() > pdf.len(), "signed PDF should be larger");
+
+    // Parse and verify structural integrity
+    let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
+
+    // Verify AcroForm exists
+    let catalog = doc.catalog().expect("should have catalog");
+    assert!(catalog.has(b"AcroForm"), "catalog should have AcroForm");
+
+    // Extract signature and verify it exists
+    let sigs = underskrift::core::parser::extract_signatures(&doc)
+        .expect("should extract signatures");
+    assert_eq!(sigs.len(), 1, "should have exactly one signature");
+    assert_eq!(sigs[0].field_name, "VisibleSig1");
+
+    // Verify the signed PDF contains appearance-related content
+    let signed_str = String::from_utf8_lossy(&signed);
+    // Should contain the Form XObject type
+    assert!(
+        signed_str.contains("/XObject"),
+        "should contain XObject type for appearance"
+    );
+    // Should contain the Form subtype
+    assert!(
+        signed_str.contains("/Form"),
+        "should contain Form subtype"
+    );
+    // Should contain /AP (appearance dictionary)
+    assert!(
+        signed_str.contains("/AP"),
+        "should contain appearance dictionary reference"
+    );
+    // Should contain the BBox
+    assert!(
+        signed_str.contains("/BBox"),
+        "should contain BBox in Form XObject"
+    );
+    // Should contain font resource references
+    assert!(
+        signed_str.contains("/Helvetica"),
+        "should reference Helvetica font"
+    );
+    // The annotation rect should be non-zero (visible)
+    assert!(
+        signed_str.contains("/Rect"),
+        "should contain Rect in annotation"
+    );
+
+    // Verify CMS signature is valid
+    let sig = &sigs[0];
+    assert!(!sig.contents.is_empty());
+    let br = sig.byte_range;
+    assert_eq!(br[0], 0);
+    assert!(br[1] > 0);
+
+    println!(
+        "Visible signature test passed. Signed PDF size: {} bytes",
+        signed.len()
+    );
+}
+
+#[tokio::test]
+async fn test_sign_pdf_with_positioned_visible_signature() {
+    use underskrift::{
+        VisibleSignatureConfig, SignatureRect, SignatureLayout, Measurement,
+        TextConfig, TextLine,
+    };
+
+    let pdf = test_pdf();
+    let signer = test_signer();
+
+    let vis_config = VisibleSignatureConfig {
+        page: 0,
+        rect: SignatureRect::Positioned {
+            left: Measurement::Inches(1.0),
+            top: Measurement::Inches(1.0),
+            width: Measurement::Inches(3.0),
+            height: Measurement::Inches(0.75),
+        },
+        layout: SignatureLayout::TextOnly(TextConfig {
+            lines: vec![
+                TextLine::new("Signed with positioned rect").bold(),
+            ],
+            ..TextConfig::default()
+        }),
+        background_color: None,
+        border: None,
+    };
+
+    let signed = PdfSigner::new()
+        .options(SigningOptions {
+            field_name: "PositionedSig".to_string(),
+            visible_signature: Some(vis_config),
+            ..Default::default()
+        })
+        .sign(&pdf, &signer)
+        .await
+        .expect("signing with positioned visible signature failed");
+
+    // Parse and verify
+    let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
+    let sigs = underskrift::core::parser::extract_signatures(&doc)
+        .expect("should extract signatures");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(sigs[0].field_name, "PositionedSig");
+
+    // Should have appearance data
+    let signed_str = String::from_utf8_lossy(&signed);
+    assert!(signed_str.contains("/AP"));
+    assert!(signed_str.contains("/XObject"));
+
+    println!(
+        "Positioned visible signature test passed. Signed PDF size: {} bytes",
+        signed.len()
+    );
+}

@@ -28,10 +28,9 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use x509_cert::Certificate;
 
-use crate::error::LtvError;
 use crate::ltv::crl::{self, CrlClient};
 use crate::ltv::ocsp::{self, OcspClient};
-use crate::ltv::status::{resolve_priority, RevocationSource, ValidationStatus};
+use crate::ltv::status::{resolve_priority, ValidationStatus};
 
 // ── Configuration ─────────────────────────────────────────────────
 
@@ -340,6 +339,7 @@ async fn run_crl_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ltv::status::RevocationSource;
 
     // ── RevocationConfig tests ────────────────────────────────────
 

@@ -6,15 +6,21 @@
 
 use lopdf::{Document, Object};
 
+#[cfg(feature = "visual")]
+use lopdf::{Dictionary, Stream};
+
 use crate::cms::builder::{CmsProfile, PdfCmsBuilder};
 use crate::core::acroform;
 use crate::core::incremental::IncrementalWriter;
 use crate::core::parser;
 use crate::core::sig_dict::{self, SigSubFilter};
 use crate::core::sig_field::{self, SignatureFieldOptions};
-use crate::crypto::algorithm::DigestAlgorithm;
+use crate::crypto::algorithm::{AlgorithmRegistry, DigestAlgorithm};
 use crate::crypto::traits::CryptoSigner;
 use crate::error::{CoreError, PdfSignError};
+
+#[cfg(feature = "visual")]
+use crate::visual::{self, VisibleSignatureConfig};
 
 /// PAdES conformance level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +93,22 @@ pub struct SigningOptions {
     pub tsa_url: Option<String>,
     /// Whether this is a certification signature (first signature with DocMDP)
     pub certify: bool,
+    /// Algorithm registry for validating that the signer's algorithms are allowed.
+    ///
+    /// When set, the signing pipeline will validate the signer's digest and
+    /// signature algorithms against this registry before signing. If `None`,
+    /// all algorithms are accepted (no validation).
+    pub algorithm_registry: Option<AlgorithmRegistry>,
+    /// Visible signature configuration.
+    ///
+    /// When set, a visible signature appearance is generated and embedded as
+    /// a Form XObject in the signature annotation. The signature will be
+    /// visible on the specified page at the specified rectangle.
+    ///
+    /// When `None`, an invisible signature is created (zero-size annotation).
+    /// Requires the `visual` feature flag for image-based appearances.
+    #[cfg(feature = "visual")]
+    pub visible_signature: Option<VisibleSignatureConfig>,
 }
 
 impl Default for SigningOptions {
@@ -104,6 +126,9 @@ impl Default for SigningOptions {
             #[cfg(feature = "tsp")]
             tsa_url: None,
             certify: false,
+            algorithm_registry: None,
+            #[cfg(feature = "visual")]
+            visible_signature: None,
         }
     }
 }
@@ -164,6 +189,13 @@ impl PdfSigner {
         pdf_data: &[u8],
         signer: &dyn CryptoSigner,
     ) -> Result<Vec<u8>, PdfSignError> {
+        // Step 0: Validate algorithms against registry if configured
+        if let Some(registry) = &self.options.algorithm_registry {
+            registry
+                .validate(signer.signature_algorithm(), signer.digest_algorithm())
+                .map_err(|msg| PdfSignError::AlgorithmNotAllowed(msg))?;
+        }
+
         // Step 1: Parse the PDF
         let mut doc = Document::load_mem(pdf_data)
             .map_err(|e| CoreError::Lopdf(e))?;
@@ -207,13 +239,94 @@ impl PdfSigner {
         // Step 4: Add sig dict as a new object
         let sig_dict_id = doc.add_object(Object::Dictionary(sig_dict));
 
+        // Step 4b: Generate visible signature appearance if configured
+        #[cfg(feature = "visual")]
+        let appearance_data = if let Some(vis_config) = &self.options.visible_signature {
+            // Get page dimensions for coordinate conversion
+            let (page_width, page_height) = get_page_dimensions(&doc, self.options.page)?;
+
+            // Generate the appearance stream
+            let appearance = visual::build_appearance(vis_config, page_width, page_height)?;
+
+            // Compute the absolute rect for the annotation
+            let abs_rect = vis_config.rect.to_absolute(page_width, page_height);
+
+            Some((appearance, abs_rect))
+        } else {
+            None
+        };
+
         // Step 5: Build the signature field
+        #[cfg(feature = "visual")]
+        let field_rect = if let Some((_, ref abs_rect)) = appearance_data {
+            *abs_rect
+        } else {
+            [0.0, 0.0, 0.0, 0.0] // invisible signature
+        };
+        #[cfg(not(feature = "visual"))]
+        let field_rect = [0.0, 0.0, 0.0, 0.0];
+
         let field_opts = SignatureFieldOptions {
             name: self.options.field_name.clone(),
             page: self.options.page,
-            rect: [0.0, 0.0, 0.0, 0.0], // invisible signature
+            rect: field_rect,
         };
-        let sig_field_dict = sig_field::build_sig_field(&field_opts, sig_dict_id);
+        #[allow(unused_mut)]
+        let mut sig_field_dict = sig_field::build_sig_field(&field_opts, sig_dict_id);
+
+        // Step 5b: Create Form XObject and wire /AP if visible
+        #[cfg(feature = "visual")]
+        let mut appearance_object_ids: Vec<lopdf::ObjectId> = Vec::new();
+        #[cfg(feature = "visual")]
+        if let Some((appearance, _)) = appearance_data {
+            // Build font resource dictionaries
+            let mut font_dict = Dictionary::new();
+            for (res_name, pdf_font_name) in &appearance.font_resources {
+                let mut fd = Dictionary::new();
+                fd.set("Type", Object::Name(b"Font".to_vec()));
+                fd.set("Subtype", Object::Name(b"Type1".to_vec()));
+                fd.set(
+                    "BaseFont",
+                    Object::Name(pdf_font_name.as_bytes().to_vec()),
+                );
+                let font_id = doc.add_object(Object::Dictionary(fd));
+                appearance_object_ids.push(font_id);
+                font_dict.set(
+                    res_name.as_bytes(),
+                    Object::Reference(font_id),
+                );
+            }
+
+            // Build the resource dictionary for the Form XObject
+            let mut resources = Dictionary::new();
+            resources.set("Font", Object::Dictionary(font_dict));
+
+            // Build the Form XObject stream
+            let mut xobj_dict = Dictionary::new();
+            xobj_dict.set("Type", Object::Name(b"XObject".to_vec()));
+            xobj_dict.set("Subtype", Object::Name(b"Form".to_vec()));
+            xobj_dict.set(
+                "BBox",
+                Object::Array(
+                    appearance
+                        .bbox
+                        .iter()
+                        .map(|&v| Object::Real(v))
+                        .collect(),
+                ),
+            );
+            xobj_dict.set("Resources", Object::Dictionary(resources));
+
+            let xobj_stream = Stream::new(xobj_dict, appearance.content);
+            let xobj_id = doc.add_object(Object::Stream(xobj_stream));
+            appearance_object_ids.push(xobj_id);
+
+            // Add /AP << /N <xobj_ref> >> to the signature field
+            let mut ap_dict = Dictionary::new();
+            ap_dict.set("N", Object::Reference(xobj_id));
+            sig_field_dict.set("AP", Object::Dictionary(ap_dict));
+        }
+
         let sig_field_id = doc.add_object(Object::Dictionary(sig_field_dict));
 
         // Step 6: Update AcroForm and page annotations
@@ -249,6 +362,14 @@ impl PdfSigner {
         // Add sig field
         if let Ok(obj) = doc.get_object(sig_field_id) {
             writer.add_object(sig_field_id, obj.clone());
+        }
+
+        // Add appearance objects (font dicts + Form XObject) if visible
+        #[cfg(feature = "visual")]
+        for obj_id in &appearance_object_ids {
+            if let Ok(obj) = doc.get_object(*obj_id) {
+                writer.add_object(*obj_id, obj.clone());
+            }
         }
 
         // Add modified catalog (has new/updated AcroForm reference)
@@ -327,4 +448,62 @@ impl Default for PdfSigner {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Extract the page dimensions (width, height) in points from a PDF document.
+///
+/// Looks up the `/MediaBox` of the specified page (0-indexed). Falls back to
+/// US Letter (612 x 792) if no MediaBox is found or cannot be parsed.
+#[cfg(feature = "visual")]
+fn get_page_dimensions(doc: &Document, page_index: u32) -> Result<(f32, f32), PdfSignError> {
+    let pages = doc.get_pages();
+    let page_num = page_index + 1; // lopdf uses 1-indexed pages
+
+    let page_id = pages
+        .get(&page_num)
+        .ok_or_else(|| CoreError::InvalidStructure(format!("Page {} not found", page_num)))?;
+
+    let page_dict = doc
+        .get_object(*page_id)
+        .and_then(|o| o.as_dict())
+        .map_err(|_| CoreError::InvalidStructure("Failed to get page dictionary".into()))?;
+
+    // Try to get MediaBox from the page, then from its parent (Pages node)
+    let media_box = if let Ok(mb) = page_dict.get(b"MediaBox") {
+        Some(mb.clone())
+    } else {
+        // Walk up to the parent Pages node for inherited MediaBox
+        page_dict
+            .get(b"Parent")
+            .ok()
+            .and_then(|p| {
+                if let Object::Reference(parent_id) = p {
+                    doc.get_object(*parent_id).ok()
+                } else {
+                    None
+                }
+            })
+            .and_then(|parent| parent.as_dict().ok())
+            .and_then(|parent_dict| parent_dict.get(b"MediaBox").ok())
+            .cloned()
+    };
+
+    if let Some(Object::Array(arr)) = media_box {
+        if arr.len() == 4 {
+            let get_f32 = |obj: &Object| -> f32 {
+                match obj {
+                    Object::Real(f) => *f,
+                    Object::Integer(i) => *i as f32,
+                    _ => 0.0,
+                }
+            };
+            let width = get_f32(&arr[2]) - get_f32(&arr[0]);
+            let height = get_f32(&arr[3]) - get_f32(&arr[1]);
+            return Ok((width, height));
+        }
+    }
+
+    // Fallback to US Letter
+    log::warn!("Could not determine page dimensions, using US Letter (612x792)");
+    Ok((612.0, 792.0))
 }
