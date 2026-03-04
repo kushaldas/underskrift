@@ -173,7 +173,8 @@ impl TrustStore {
     /// Find the trust anchor that issued the given certificate, if any.
     ///
     /// Matching is done by comparing the certificate's issuer name with
-    /// each anchor's subject name. This does NOT verify the signature —
+    /// each anchor's subject name. Returns the **first** name-match.
+    /// This does NOT verify the signature —
     /// use [`verify_chain`](Self::verify_chain) for full validation.
     pub fn find_issuer(&self, cert: &Certificate) -> Option<&Certificate> {
         let issuer = &cert.tbs_certificate.issuer;
@@ -184,6 +185,25 @@ impl TrustStore {
                 None
             }
         })
+    }
+
+    /// Find **all** trust anchors whose subject matches the given certificate's issuer.
+    ///
+    /// This is used by [`verify_chain`](Self::verify_chain) so that when multiple
+    /// anchors share the same subject name (but have different keys), each can be
+    /// tried until one successfully verifies the certificate's signature.
+    fn find_all_issuers(&self, cert: &Certificate) -> Vec<&Certificate> {
+        let issuer = &cert.tbs_certificate.issuer;
+        self.anchors
+            .iter()
+            .filter_map(|anchor| {
+                if &anchor.cert.tbs_certificate.subject == issuer {
+                    Some(&anchor.cert)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Find the trust anchor that issued the given DER-encoded certificate.
@@ -286,33 +306,46 @@ impl TrustStore {
             }
         }
 
-        let anchor = self
-            .find_issuer(last)
-            .ok_or_else(|| TrustError::UntrustedRoot {
+        let candidates = self.find_all_issuers(last);
+        if candidates.is_empty() {
+            return Err(TrustError::UntrustedRoot {
                 issuer: format!("{}", last.tbs_certificate.issuer),
-            })?;
+            });
+        }
 
-        // Verify the last certificate's signature against the anchor
-        crate::crypto::verify::verify_certificate_signature(last, anchor)?;
-
-        // Check time validity of the anchor
-        if let Some(time) = validation_time {
-            let validity = &anchor.tbs_certificate.validity;
-            if time < validity.not_before.to_date_time() {
-                return Err(TrustError::NotYetValid {
-                    index: chain.len(), // anchor
-                    not_before: validity.not_before.to_date_time(),
-                });
-            }
-            if time > validity.not_after.to_date_time() {
-                return Err(TrustError::Expired {
-                    index: chain.len(),
-                    not_after: validity.not_after.to_date_time(),
-                });
+        // Try each candidate anchor — different anchors may share the same
+        // subject name but have different keys (e.g., re-issued roots).
+        let mut last_err = None;
+        for anchor in &candidates {
+            match crate::crypto::verify::verify_certificate_signature(last, anchor) {
+                Ok(()) => {
+                    // Signature verified — now check anchor time validity
+                    if let Some(time) = validation_time {
+                        let validity = &anchor.tbs_certificate.validity;
+                        if time < validity.not_before.to_date_time() {
+                            return Err(TrustError::NotYetValid {
+                                index: chain.len(),
+                                not_before: validity.not_before.to_date_time(),
+                            });
+                        }
+                        if time > validity.not_after.to_date_time() {
+                            return Err(TrustError::Expired {
+                                index: chain.len(),
+                                not_after: validity.not_after.to_date_time(),
+                            });
+                        }
+                    }
+                    return Ok(anchor);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    // Try next candidate
+                }
             }
         }
 
-        Ok(anchor)
+        // All candidates failed signature verification
+        Err(last_err.unwrap())
     }
 }
 

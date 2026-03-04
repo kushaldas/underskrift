@@ -860,8 +860,8 @@ impl RevisionAnalysis {
     /// Check if a signature has been extended by non-safe updates.
     ///
     /// Scans forward from the signature's revision looking for the first
-    /// revision that is not a signature and not a validDSS. If found,
-    /// returns whether that revision is unsafe.
+    /// revision that is not a signature, not a document timestamp, and not
+    /// a valid DSS. If found, returns whether that revision is unsafe.
     pub fn is_extended_by_non_safe_updates(&self, byte_range: &[usize; 4]) -> bool {
         let rev_idx = match self.find_signature_revision(byte_range) {
             Some(idx) => idx,
@@ -870,7 +870,7 @@ impl RevisionAnalysis {
 
         for i in (rev_idx + 1)..self.revisions.len() {
             let rev = &self.revisions[i];
-            if !rev.is_signature && !rev.valid_dss {
+            if !rev.is_signature && !rev.is_doc_timestamp && !rev.valid_dss {
                 return !rev.safe_update;
             }
         }
@@ -926,7 +926,7 @@ fn classify_revision(
                     curr_doc,
                     old,
                     new,
-                    rev.is_signature,
+                    rev.is_signature || rev.is_doc_timestamp,
                 ) {
                     safe_objects.push(*obj_num);
                 }

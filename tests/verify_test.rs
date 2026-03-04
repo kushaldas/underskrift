@@ -584,3 +584,72 @@ fn test_verify_kushal_signed_pdf() {
         other => panic!("Sig1 crypto_validity should be Valid, got: {other:?}"),
     }
 }
+
+// ── Real-world signed PDF: hello-signed-prod.pdf ──────────────────────────
+
+/// Test verification of hello-signed-prod.pdf (same CA chain as kushal_about-signed.pdf).
+/// This tests Bug 5: chain verification should not report P-521 errors for P-256 chains.
+#[test]
+fn test_verify_hello_signed_prod_pdf() {
+    let pdf_path = format!("{}/../../../hello-signed-prod.pdf", FIXTURES);
+    let pdf_data = std::fs::read(&pdf_path).expect("failed to read hello-signed-prod.pdf");
+
+    // Load just the root CA — minimal trust store
+    let trust_base = format!("{}/../../../pdfviewer/trust", FIXTURES);
+    let sig_store =
+        TrustStore::from_pem_directory(format!("{}/sig", trust_base))
+            .expect("failed to load sig trust dir");
+    let tsa_store =
+        TrustStore::from_pem_directory(format!("{}/tsa", trust_base))
+            .expect("failed to load tsa trust dir");
+
+    let trust_stores = TrustStoreSet::new()
+        .with_sig_store(sig_store)
+        .with_tsa_store(tsa_store);
+
+    let verifier = SignatureVerifier::new(&trust_stores);
+    let report = verifier.verify_pdf(&pdf_data).expect("verification failed");
+
+    assert_eq!(report.signatures.len(), 2, "should have 2 signatures");
+
+    let sig0 = &report.signatures[0];
+    eprintln!("Sig0 field: {}", sig0.field_name);
+    eprintln!("Sig0 status: {:?}", sig0.status);
+    eprintln!("Sig0 chain_trusted: {}", sig0.chain_trusted);
+    eprintln!("Sig0 cert_validity: {:?}", sig0.certificate_validity);
+    eprintln!("Sig0 trust_anchor: {:?}", sig0.trust_anchor);
+    eprintln!("Sig0 covers_whole_document_revision: {:?}", sig0.covers_whole_document_revision);
+    eprintln!("Sig0 extended_by_non_safe_updates: {:?}", sig0.extended_by_non_safe_updates);
+    eprintln!("Sig0 summary: {}", sig0.summary);
+
+    let sig1 = &report.signatures[1];
+    eprintln!("\nSig1 field: {}", sig1.field_name);
+    eprintln!("Sig1 status: {:?}", sig1.status);
+    eprintln!("Sig1 chain_trusted: {}", sig1.chain_trusted);
+    eprintln!("Sig1 cert_validity: {:?}", sig1.certificate_validity);
+    eprintln!("Sig1 summary: {}", sig1.summary);
+
+    // Sig0: chain should be trusted (root CA is in trust store)
+    // The RSA signature is genuinely invalid, but the cert chain itself is valid
+    assert!(
+        sig0.chain_trusted,
+        "Sig0 chain should be trusted — root CA is in trust store. cert_validity: {:?}",
+        sig0.certificate_validity
+    );
+
+    // Sig0: revision analysis should recognize doc timestamp as a safe update
+    assert_eq!(
+        sig0.covers_whole_document_revision,
+        Some(true),
+        "Sig0 should cover the whole document revision (doc timestamp is a safe update)"
+    );
+    assert_eq!(
+        sig0.extended_by_non_safe_updates,
+        Some(false),
+        "Sig0 should NOT be extended by non-safe updates"
+    );
+
+    // Sig1: the document timestamp should be fully valid
+    assert_eq!(sig1.status, SignatureStatus::Valid, "Sig1 doc timestamp should be Valid");
+    assert!(sig1.chain_trusted, "Sig1 chain should be trusted");
+}

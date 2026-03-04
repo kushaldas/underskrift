@@ -10,7 +10,7 @@ keywords = ["pdf", "signing", "pades", "pkcs7", "digital-signature"]
 categories = ["cryptography", "parser-implementations"]
 
 [features]
-default = ["tsp", "ltv", "visual", "verify"]
+default = ["tsp", "ltv", "visual", "verify", "blocking", "saci", "svt", "report"]
 
 # Network-dependent features
 tsp      = ["dep:reqwest", "dep:tokio"]       # RFC 3161 timestamping
@@ -40,7 +40,7 @@ rsa = { version = "0.9", features = ["sha2"] }
 ecdsa = { version = "0.16", features = ["signing", "verifying", "der"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
 p384 = { version = "0.13", features = ["ecdsa"] }
-p521 = { version = "0.13", features = ["ecdsa"] }
+p521 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 ed25519-dalek = { version = "2", features = ["pem"] }
 signature = "2"
 
