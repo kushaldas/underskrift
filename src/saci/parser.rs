@@ -4,8 +4,7 @@
 //! certificate, decodes the ASN.1 `AuthenticationContexts` SEQUENCE, and
 //! parses the embedded XML into structured [`SAMLAuthContext`] objects.
 
-use quick_xml::events::Event;
-use quick_xml::Reader;
+use uppsala::{Document, NodeId};
 use x509_cert::Certificate;
 
 use super::{
@@ -134,46 +133,32 @@ fn decode_authentication_contexts(
 }
 
 // ---------------------------------------------------------------------------
-// XML Parsing
+// XML Parsing (using uppsala DOM parser)
 // ---------------------------------------------------------------------------
 
 /// Parse a SACI `<SAMLAuthContext>` XML string into a structured object.
 pub fn parse_saml_auth_context(xml: &str) -> Result<SAMLAuthContext, SaciError> {
+    let doc = uppsala::parse(xml).map_err(|e| SaciError::Xml(format!("XML parse error: {e}")))?;
+
+    let root = doc
+        .document_element()
+        .ok_or_else(|| SaciError::Xml("no root element".into()))?;
+
     let mut auth_context_info = None;
     let mut id_attributes = None;
 
-    let mut reader = Reader::from_str(xml);
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Eof) => break,
-            Ok(Event::Start(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let local = local_name_str(&name_bytes);
-                match local {
-                    "AuthContextInfo" => {
-                        auth_context_info = Some(parse_auth_context_info_attrs(e)?);
-                    }
-                    "IdAttributes" => {
-                        id_attributes = Some(parse_id_attributes(&mut reader)?);
-                    }
-                    _ => {} // skip unknown elements
+    for child_id in doc.children_iter(root) {
+        if let Some(elem) = doc.element(child_id) {
+            let local = elem.name.local_name.as_ref();
+            match local {
+                "AuthContextInfo" => {
+                    auth_context_info = Some(parse_auth_context_info(&doc, child_id)?);
                 }
-            }
-            Ok(Event::Empty(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let local = local_name_str(&name_bytes);
-                if local == "AuthContextInfo" {
-                    auth_context_info = Some(parse_auth_context_info_attrs(e)?);
+                "IdAttributes" => {
+                    id_attributes = Some(parse_id_attributes(&doc, child_id)?);
                 }
+                _ => {} // skip unknown elements
             }
-            Err(e) => {
-                return Err(SaciError::Xml(format!(
-                    "XML parse error at position {}: {e}",
-                    reader.buffer_position()
-                )));
-            }
-            _ => {}
         }
     }
 
@@ -183,73 +168,48 @@ pub fn parse_saml_auth_context(xml: &str) -> Result<SAMLAuthContext, SaciError> 
     })
 }
 
-/// Parse attributes from an `<AuthContextInfo>` element.
-fn parse_auth_context_info_attrs(
-    e: &quick_xml::events::BytesStart<'_>,
-) -> Result<AuthContextInfo, SaciError> {
-    let mut identity_provider = None;
-    let mut authentication_instant = None;
-    let mut authn_context_class_ref = None;
-    let mut assertion_ref = None;
-    let mut service_id = None;
+/// Parse attributes from an `<AuthContextInfo>` element node.
+fn parse_auth_context_info(doc: &Document<'_>, node: NodeId) -> Result<AuthContextInfo, SaciError> {
+    let identity_provider = doc
+        .get_attribute(node, "IdentityProvider")
+        .map(|s| s.to_string())
+        .ok_or_else(|| SaciError::MissingAttribute("IdentityProvider".into()))?;
 
-    for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-        let value = attr
-            .unescape_value()
-            .map_err(|e| SaciError::Xml(format!("attribute decode error: {e}")))?
-            .to_string();
+    let authentication_instant = doc
+        .get_attribute(node, "AuthenticationInstant")
+        .map(|s| s.to_string())
+        .ok_or_else(|| SaciError::MissingAttribute("AuthenticationInstant".into()))?;
 
-        match key {
-            "IdentityProvider" => identity_provider = Some(value),
-            "AuthenticationInstant" => authentication_instant = Some(value),
-            "AuthnContextClassRef" => authn_context_class_ref = Some(value),
-            "AssertionRef" => assertion_ref = Some(value),
-            "ServiceID" => service_id = Some(value),
-            _ => {} // ignore unknown attributes
-        }
-    }
+    let authn_context_class_ref = doc
+        .get_attribute(node, "AuthnContextClassRef")
+        .map(|s| s.to_string())
+        .ok_or_else(|| SaciError::MissingAttribute("AuthnContextClassRef".into()))?;
+
+    let assertion_ref = doc
+        .get_attribute(node, "AssertionRef")
+        .map(|s| s.to_string());
+
+    let service_id = doc.get_attribute(node, "ServiceID").map(|s| s.to_string());
 
     Ok(AuthContextInfo {
-        identity_provider: identity_provider
-            .ok_or_else(|| SaciError::MissingAttribute("IdentityProvider".into()))?,
-        authentication_instant: authentication_instant
-            .ok_or_else(|| SaciError::MissingAttribute("AuthenticationInstant".into()))?,
-        authn_context_class_ref: authn_context_class_ref
-            .ok_or_else(|| SaciError::MissingAttribute("AuthnContextClassRef".into()))?,
+        identity_provider,
+        authentication_instant,
+        authn_context_class_ref,
         assertion_ref,
         service_id,
     })
 }
 
 /// Parse the `<IdAttributes>` element and its child `<AttributeMapping>` elements.
-fn parse_id_attributes(reader: &mut Reader<&[u8]>) -> Result<IdAttributes, SaciError> {
+fn parse_id_attributes(doc: &Document<'_>, node: NodeId) -> Result<IdAttributes, SaciError> {
     let mut mappings = Vec::new();
-    let mut depth = 1; // We're inside <IdAttributes>
 
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let local = local_name_str(&name_bytes);
-                if local == "AttributeMapping" {
-                    let mapping = parse_attribute_mapping(e, reader)?;
-                    mappings.push(mapping);
-                } else {
-                    depth += 1;
-                }
+    for child_id in doc.children_iter(node) {
+        if let Some(elem) = doc.element(child_id) {
+            if elem.name.local_name.as_ref() == "AttributeMapping" {
+                let mapping = parse_attribute_mapping(doc, child_id)?;
+                mappings.push(mapping);
             }
-            Ok(Event::End(_)) => {
-                depth -= 1;
-                if depth == 0 {
-                    break; // </IdAttributes>
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => {
-                return Err(SaciError::Xml(format!("XML error in IdAttributes: {e}")));
-            }
-            _ => {}
         }
     }
 
@@ -258,74 +218,31 @@ fn parse_id_attributes(reader: &mut Reader<&[u8]>) -> Result<IdAttributes, SaciE
 
 /// Parse an `<AttributeMapping>` element.
 fn parse_attribute_mapping(
-    start: &quick_xml::events::BytesStart<'_>,
-    reader: &mut Reader<&[u8]>,
+    doc: &Document<'_>,
+    node: NodeId,
 ) -> Result<AttributeMapping, SaciError> {
     // Read Type and Ref attributes
-    let mut mapping_type = None;
-    let mut reference = None;
+    let type_str = doc
+        .get_attribute(node, "Type")
+        .ok_or_else(|| SaciError::MissingAttribute("AttributeMapping/@Type".into()))?;
 
-    for attr in start.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-        let value = attr
-            .unescape_value()
-            .map_err(|e| SaciError::Xml(format!("attribute decode error: {e}")))?
-            .to_string();
+    let mapping_type = MappingType::from_str(type_str)
+        .ok_or_else(|| SaciError::Xml(format!("unknown AttributeMapping Type: {type_str}")))?;
 
-        match key {
-            "Type" => {
-                mapping_type = MappingType::from_str(&value);
-                if mapping_type.is_none() {
-                    return Err(SaciError::Xml(format!(
-                        "unknown AttributeMapping Type: {value}"
-                    )));
-                }
-            }
-            "Ref" => reference = Some(value),
-            _ => {}
-        }
-    }
+    let reference = doc
+        .get_attribute(node, "Ref")
+        .map(|s| s.to_string())
+        .ok_or_else(|| SaciError::MissingAttribute("AttributeMapping/@Ref".into()))?;
 
-    let mapping_type =
-        mapping_type.ok_or_else(|| SaciError::MissingAttribute("AttributeMapping/@Type".into()))?;
-    let reference =
-        reference.ok_or_else(|| SaciError::MissingAttribute("AttributeMapping/@Ref".into()))?;
-
-    // Parse child elements — looking for <saml:Attribute>
+    // Find child <saml:Attribute> element
     let mut attribute = None;
-    let mut depth = 1;
 
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let local = local_name_str(&name_bytes);
-                if local == "Attribute" {
-                    attribute = Some(parse_saml_attribute(e, reader)?);
-                } else {
-                    depth += 1;
-                }
+    for child_id in doc.children_iter(node) {
+        if let Some(elem) = doc.element(child_id) {
+            if elem.name.local_name.as_ref() == "Attribute" {
+                attribute = Some(parse_saml_attribute(doc, child_id)?);
+                break;
             }
-            Ok(Event::Empty(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let local = local_name_str(&name_bytes);
-                if local == "Attribute" {
-                    attribute = Some(parse_saml_attribute_empty(e)?);
-                }
-            }
-            Ok(Event::End(_)) => {
-                depth -= 1;
-                if depth == 0 {
-                    break; // </AttributeMapping>
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => {
-                return Err(SaciError::Xml(format!(
-                    "XML error in AttributeMapping: {e}"
-                )));
-            }
-            _ => {}
         }
     }
 
@@ -338,72 +255,24 @@ fn parse_attribute_mapping(
     })
 }
 
-/// Parse a `<saml:Attribute>` element (with children).
-fn parse_saml_attribute(
-    start: &quick_xml::events::BytesStart<'_>,
-    reader: &mut Reader<&[u8]>,
-) -> Result<SamlAttribute, SaciError> {
-    let mut attr = parse_saml_attribute_attrs(start)?;
+/// Parse a `<saml:Attribute>` element.
+fn parse_saml_attribute(doc: &Document<'_>, node: NodeId) -> Result<SamlAttribute, SaciError> {
+    let name = doc.get_attribute(node, "Name").map(|s| s.to_string());
+    let name_format = doc.get_attribute(node, "NameFormat").map(|s| s.to_string());
+    let friendly_name = doc
+        .get_attribute(node, "FriendlyName")
+        .map(|s| s.to_string());
 
-    // Read child <saml:AttributeValue> elements
-    let mut depth = 1;
+    // Collect child <saml:AttributeValue> text content
+    let mut values = Vec::new();
 
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref e)) => {
-                let name_bytes = e.name().as_ref().to_vec();
-                let local = local_name_str(&name_bytes);
-                if local == "AttributeValue" {
-                    let text = read_element_text(reader)?;
-                    attr.values.push(text.trim().to_string());
-                } else {
-                    depth += 1;
-                }
+    for child_id in doc.children_iter(node) {
+        if let Some(elem) = doc.element(child_id) {
+            if elem.name.local_name.as_ref() == "AttributeValue" {
+                let text = doc.text_content_deep(child_id);
+                let trimmed = text.trim().to_string();
+                values.push(trimmed);
             }
-            Ok(Event::End(_)) => {
-                depth -= 1;
-                if depth == 0 {
-                    break; // </saml:Attribute>
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => {
-                return Err(SaciError::Xml(format!("XML error in Attribute: {e}")));
-            }
-            _ => {}
-        }
-    }
-
-    Ok(attr)
-}
-
-/// Parse a `<saml:Attribute/>` empty element (no children).
-fn parse_saml_attribute_empty(
-    start: &quick_xml::events::BytesStart<'_>,
-) -> Result<SamlAttribute, SaciError> {
-    parse_saml_attribute_attrs(start)
-}
-
-/// Parse the XML attributes of a `<saml:Attribute>` element.
-fn parse_saml_attribute_attrs(
-    e: &quick_xml::events::BytesStart<'_>,
-) -> Result<SamlAttribute, SaciError> {
-    let mut name = None;
-    let mut name_format = None;
-    let mut friendly_name = None;
-
-    for attr in e.attributes().flatten() {
-        let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-        let value = attr
-            .unescape_value()
-            .map_err(|e| SaciError::Xml(format!("attribute decode error: {e}")))?
-            .to_string();
-
-        match key {
-            "Name" => name = Some(value),
-            "NameFormat" => name_format = Some(value),
-            "FriendlyName" => friendly_name = Some(value),
-            _ => {}
         }
     }
 
@@ -411,43 +280,8 @@ fn parse_saml_attribute_attrs(
         name,
         name_format,
         friendly_name,
-        values: Vec::new(),
+        values,
     })
-}
-
-/// Read the text content of the current element until its closing tag.
-fn read_element_text(reader: &mut Reader<&[u8]>) -> Result<String, SaciError> {
-    let mut text = String::new();
-    let mut depth = 1;
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Text(e)) => {
-                let t = e
-                    .unescape()
-                    .map_err(|e| SaciError::Xml(format!("text unescape error: {e}")))?;
-                text.push_str(&t);
-            }
-            Ok(Event::Start(_)) => {
-                depth += 1;
-            }
-            Ok(Event::End(_)) => {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => {
-                return Err(SaciError::Xml(format!(
-                    "XML error reading element text: {e}"
-                )));
-            }
-            _ => {}
-        }
-    }
-
-    Ok(text)
 }
 
 // ---------------------------------------------------------------------------
@@ -497,19 +331,6 @@ fn parse_der_length(data: &[u8]) -> Result<(usize, usize), SaciError> {
             len = (len << 8) | (data[1 + i] as usize);
         }
         Ok((len, 1 + num_bytes))
-    }
-}
-
-/// Extract the local name from a possibly namespaced XML element name.
-///
-/// E.g., `"saci:AuthContextInfo"` → `"AuthContextInfo"`,
-/// `"saml:Attribute"` → `"Attribute"`, `"SAMLAuthContext"` → `"SAMLAuthContext"`.
-fn local_name_str(name: &[u8]) -> &str {
-    let s = std::str::from_utf8(name).unwrap_or("");
-    if let Some(pos) = s.rfind(':') {
-        &s[pos + 1..]
-    } else {
-        s
     }
 }
 
@@ -634,14 +455,6 @@ mod tests {
     fn test_mapping_type_display() {
         assert_eq!(format!("{}", MappingType::Rdn), "rdn");
         assert_eq!(format!("{}", MappingType::San), "san");
-    }
-
-    #[test]
-    fn test_local_name_extraction() {
-        assert_eq!(local_name_str(b"saci:AuthContextInfo"), "AuthContextInfo");
-        assert_eq!(local_name_str(b"saml:Attribute"), "Attribute");
-        assert_eq!(local_name_str(b"SAMLAuthContext"), "SAMLAuthContext");
-        assert_eq!(local_name_str(b""), "");
     }
 
     #[test]

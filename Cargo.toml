@@ -20,7 +20,7 @@ blocking = ["dep:tokio"]                       # Sync wrappers via block_on()
 # Optional modules
 visual   = ["dep:image", "dep:subsetter", "dep:ttf-parser"]  # Visible signature appearances + font subsetting
 verify   = []                                  # Signature verification & validation
-saci     = ["dep:quick-xml"]                   # SACI AuthnContext X.509 extension parsing (RFC 7773)
+saci     = ["dep:uppsala"]                      # SACI AuthnContext X.509 extension parsing (RFC 7773)
 svt      = ["dep:josekit", "dep:serde", "dep:serde_json"]  # RFC 9321 Signature Validation Tokens
 report   = ["verify", "dep:uppsala"]                      # ETSI TS 119 102-2 validation reports
 
@@ -78,16 +78,13 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 subsetter = { version = "0.2", optional = true }
 ttf-parser = { version = "0.25", optional = true }
 
-# XML parsing — optional (SACI)
-quick-xml = { version = "0.37", optional = true }
+# XML parsing — optional (SACI + ETSI reports)
+uppsala = { version = "0.3", optional = true }
 
 # JWT / SVT — optional
 josekit = { version = "0.10", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
-
-# ETSI validation reports — optional
-uppsala = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
