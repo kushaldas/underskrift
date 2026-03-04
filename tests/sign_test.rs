@@ -340,3 +340,470 @@ async fn test_sign_pdf_with_positioned_visible_signature() {
         signed.len()
     );
 }
+
+#[tokio::test]
+async fn test_sign_pdf_with_image_only_signature() {
+    use underskrift::{
+        VisibleSignatureConfig, SignatureRect, SignatureLayout,
+        ImageConfig, ImageFormat, ImageScale,
+    };
+
+    let pdf = test_pdf();
+    let signer = test_signer();
+
+    // Create a small test JPEG in memory
+    let jpeg_data = {
+        use std::io::Cursor;
+        let img = image::RgbImage::from_pixel(20, 20, image::Rgb([0, 0, 200]));
+        let mut buf = Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+        buf.into_inner()
+    };
+
+    let vis_config = VisibleSignatureConfig {
+        page: 0,
+        rect: SignatureRect::Absolute {
+            llx: 50.0,
+            lly: 680.0,
+            urx: 200.0,
+            ury: 750.0,
+        },
+        layout: SignatureLayout::ImageOnly(ImageConfig {
+            data: jpeg_data,
+            format: ImageFormat::Jpeg,
+            scale: ImageScale::FitPreserveAspect,
+        }),
+        background_color: None,
+        border: None,
+    };
+
+    let signed = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "ImageSig1".to_string(),
+            visible_signature: Some(vis_config),
+            ..Default::default()
+        })
+        .sign(&pdf, &signer)
+        .await
+        .expect("signing with image-only visible signature failed");
+
+    assert!(signed.len() > pdf.len());
+
+    let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
+    let sigs = underskrift::core::parser::extract_signatures(&doc)
+        .expect("should extract signatures");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(sigs[0].field_name, "ImageSig1");
+
+    // Should have appearance + image xobject
+    let signed_str = String::from_utf8_lossy(&signed);
+    assert!(signed_str.contains("/AP"), "should have appearance dictionary");
+    assert!(signed_str.contains("/Image"), "should have Image XObject subtype");
+    assert!(signed_str.contains("/DCTDecode"), "should have DCTDecode filter for JPEG");
+
+    println!(
+        "Image-only signature test passed. Signed PDF size: {} bytes",
+        signed.len()
+    );
+}
+
+#[tokio::test]
+async fn test_sign_pdf_with_image_and_text_signature() {
+    use underskrift::{
+        VisibleSignatureConfig, SignatureRect, SignatureLayout,
+        ImageConfig, ImageFormat, ImageScale, TextConfig, TextLine,
+        Color, Border, Arrangement,
+    };
+
+    let pdf = test_pdf();
+    let signer = test_signer();
+
+    // Create a small test JPEG in memory
+    let jpeg_data = {
+        use std::io::Cursor;
+        let img = image::RgbImage::from_pixel(30, 30, image::Rgb([200, 50, 0]));
+        let mut buf = Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+        buf.into_inner()
+    };
+
+    let vis_config = VisibleSignatureConfig {
+        page: 0,
+        rect: SignatureRect::Absolute {
+            llx: 50.0,
+            lly: 650.0,
+            urx: 350.0,
+            ury: 740.0,
+        },
+        layout: SignatureLayout::ImageAndText {
+            image: ImageConfig {
+                data: jpeg_data,
+                format: ImageFormat::Jpeg,
+                scale: ImageScale::FitPreserveAspect,
+            },
+            text: TextConfig {
+                lines: vec![
+                    TextLine::new("Signed by Integration Test").bold(),
+                    TextLine::new("Reason: Image+Text test"),
+                    TextLine::new("Date: 2026-03-03"),
+                ],
+                font_size: 8.0,
+                ..TextConfig::default()
+            },
+            arrangement: Arrangement::ImageLeftTextRight,
+        },
+        background_color: Some(Color::white()),
+        border: Some(Border::default()),
+    };
+
+    let signed = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "ImageTextSig1".to_string(),
+            reason: Some("Image and text test".to_string()),
+            visible_signature: Some(vis_config),
+            ..Default::default()
+        })
+        .sign(&pdf, &signer)
+        .await
+        .expect("signing with image+text visible signature failed");
+
+    assert!(signed.len() > pdf.len());
+
+    let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
+    let sigs = underskrift::core::parser::extract_signatures(&doc)
+        .expect("should extract signatures");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(sigs[0].field_name, "ImageTextSig1");
+
+    // Should have appearance, font, and image resources
+    let signed_str = String::from_utf8_lossy(&signed);
+    assert!(signed_str.contains("/AP"), "should have appearance dictionary");
+    assert!(signed_str.contains("/Image"), "should have Image XObject");
+    assert!(signed_str.contains("/Helvetica"), "should have font reference");
+    assert!(signed_str.contains("/DCTDecode"), "should have DCTDecode for JPEG");
+
+    // Verify CMS is valid
+    let sig = &sigs[0];
+    assert!(!sig.contents.is_empty());
+    let br = sig.byte_range;
+    assert_eq!(br[0], 0);
+    assert!(br[1] > 0);
+
+    println!(
+        "Image+Text signature test passed. Signed PDF size: {} bytes",
+        signed.len()
+    );
+}
+
+#[tokio::test]
+async fn test_sign_pdf_with_png_alpha_image() {
+    use underskrift::{
+        VisibleSignatureConfig, SignatureRect, SignatureLayout,
+        ImageConfig, ImageFormat, ImageScale,
+    };
+
+    let pdf = test_pdf();
+    let signer = test_signer();
+
+    // Create a small test PNG with alpha channel
+    let png_data = {
+        use std::io::Cursor;
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 128]));
+        let mut buf = Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    };
+
+    let vis_config = VisibleSignatureConfig {
+        page: 0,
+        rect: SignatureRect::Absolute {
+            llx: 100.0,
+            lly: 700.0,
+            urx: 200.0,
+            ury: 760.0,
+        },
+        layout: SignatureLayout::ImageOnly(ImageConfig {
+            data: png_data,
+            format: ImageFormat::Png,
+            scale: ImageScale::Stretch,
+        }),
+        background_color: None,
+        border: None,
+    };
+
+    let signed = PdfSigner::new()
+        .options(SigningOptions {
+            field_name: "PngAlphaSig".to_string(),
+            visible_signature: Some(vis_config),
+            ..Default::default()
+        })
+        .sign(&pdf, &signer)
+        .await
+        .expect("signing with PNG alpha image failed");
+
+    assert!(signed.len() > pdf.len());
+
+    let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
+    let sigs = underskrift::core::parser::extract_signatures(&doc)
+        .expect("should extract signatures");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(sigs[0].field_name, "PngAlphaSig");
+
+    // Should have SMask for alpha channel
+    let signed_str = String::from_utf8_lossy(&signed);
+    assert!(signed_str.contains("/SMask"), "should have SMask for alpha channel");
+    assert!(signed_str.contains("/DeviceGray"), "SMask should use DeviceGray");
+    assert!(signed_str.contains("/FlateDecode"), "PNG should use FlateDecode");
+
+    println!(
+        "PNG alpha signature test passed. Signed PDF size: {} bytes",
+        signed.len()
+    );
+}
+
+#[tokio::test]
+async fn test_sign_pdf_with_embedded_font_text_only() {
+    use underskrift::{
+        VisibleSignatureConfig, SignatureRect, SignatureLayout,
+        TextConfig, TextLine, FontSpec, Color, Border,
+    };
+
+    let pdf = test_pdf();
+    let signer = test_signer();
+
+    // Load a system TTF font (DejaVu Sans is widely available)
+    let font_data = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+        .expect("DejaVuSans.ttf not found; install fonts-dejavu-core");
+
+    let vis_config = VisibleSignatureConfig {
+        page: 0,
+        rect: SignatureRect::Absolute {
+            llx: 50.0,
+            lly: 650.0,
+            urx: 300.0,
+            ury: 720.0,
+        },
+        layout: SignatureLayout::TextOnly(TextConfig {
+            lines: vec![
+                TextLine::new("Signed by Embedded Font Test"),
+                TextLine::new("Reason: Testing CIDFont/Type0 embedding"),
+                TextLine::new("Date: 2026-03-03"),
+            ],
+            font: FontSpec::Embedded {
+                data: font_data,
+                name: "DejaVuSans".to_string(),
+            },
+            font_size: 9.0,
+            ..TextConfig::default()
+        }),
+        background_color: Some(Color::white()),
+        border: Some(Border::default()),
+    };
+
+    let signed = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "EmbeddedFontSig1".to_string(),
+            reason: Some("Embedded font test".to_string()),
+            visible_signature: Some(vis_config),
+            ..Default::default()
+        })
+        .sign(&pdf, &signer)
+        .await
+        .expect("signing with embedded font visible signature failed");
+
+    assert!(signed.len() > pdf.len());
+
+    let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
+    let sigs = underskrift::core::parser::extract_signatures(&doc)
+        .expect("should extract signatures");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(sigs[0].field_name, "EmbeddedFontSig1");
+
+    // Verify the signed PDF contains CIDFont/Type0 font structures
+    let signed_str = String::from_utf8_lossy(&signed);
+    assert!(signed_str.contains("/AP"), "should have appearance dictionary");
+    assert!(signed_str.contains("/Type0"), "should have Type0 font");
+    assert!(signed_str.contains("/CIDFontType2"), "should have CIDFontType2");
+    assert!(signed_str.contains("/Identity-H"), "should have Identity-H encoding");
+    assert!(signed_str.contains("/FontFile2"), "should have embedded font file");
+    assert!(signed_str.contains("/ToUnicode"), "should have ToUnicode CMap");
+    assert!(signed_str.contains("DejaVuSans"), "should contain font name");
+
+    println!(
+        "Embedded font text-only signature test passed. Signed PDF size: {} bytes",
+        signed.len()
+    );
+}
+
+#[tokio::test]
+async fn test_sign_pdf_with_embedded_font_image_and_text() {
+    use underskrift::{
+        VisibleSignatureConfig, SignatureRect, SignatureLayout,
+        ImageConfig, ImageFormat, ImageScale, TextConfig, TextLine,
+        FontSpec, Color, Border, Arrangement,
+    };
+
+    let pdf = test_pdf();
+    let signer = test_signer();
+
+    // Load a system TTF font
+    let font_data = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+        .expect("DejaVuSans.ttf not found; install fonts-dejavu-core");
+
+    // Create a small test JPEG
+    let jpeg_data = {
+        use std::io::Cursor;
+        let img = image::RgbImage::from_pixel(20, 20, image::Rgb([0, 128, 0]));
+        let mut buf = Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+        buf.into_inner()
+    };
+
+    let vis_config = VisibleSignatureConfig {
+        page: 0,
+        rect: SignatureRect::Absolute {
+            llx: 50.0,
+            lly: 580.0,
+            urx: 400.0,
+            ury: 660.0,
+        },
+        layout: SignatureLayout::ImageAndText {
+            image: ImageConfig {
+                data: jpeg_data,
+                format: ImageFormat::Jpeg,
+                scale: ImageScale::FitPreserveAspect,
+            },
+            text: TextConfig {
+                lines: vec![
+                    TextLine::new("Signed with Embedded Font + Image"),
+                    TextLine::new("Location: Stockholm"),
+                ],
+                font: FontSpec::Embedded {
+                    data: font_data,
+                    name: "DejaVuSans".to_string(),
+                },
+                font_size: 8.0,
+                ..TextConfig::default()
+            },
+            arrangement: Arrangement::ImageLeftTextRight,
+        },
+        background_color: Some(Color::white()),
+        border: Some(Border::default()),
+    };
+
+    let signed = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "EmbFontImgSig1".to_string(),
+            visible_signature: Some(vis_config),
+            ..Default::default()
+        })
+        .sign(&pdf, &signer)
+        .await
+        .expect("signing with embedded font image+text visible signature failed");
+
+    assert!(signed.len() > pdf.len());
+
+    let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
+    let sigs = underskrift::core::parser::extract_signatures(&doc)
+        .expect("should extract signatures");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(sigs[0].field_name, "EmbFontImgSig1");
+
+    // Should have both image and embedded font structures
+    let signed_str = String::from_utf8_lossy(&signed);
+    assert!(signed_str.contains("/Image"), "should have Image XObject");
+    assert!(signed_str.contains("/Type0"), "should have Type0 font");
+    assert!(signed_str.contains("/CIDFontType2"), "should have CIDFontType2");
+    assert!(signed_str.contains("/FontFile2"), "should have embedded font file");
+
+    println!(
+        "Embedded font image+text signature test passed. Signed PDF size: {} bytes",
+        signed.len()
+    );
+}
+
+/// Test signing with a custom template appearance.
+///
+/// Uses `SignatureTemplate::default()` wrapped in `SignatureLayout::Custom`
+/// to verify that the signer pipeline correctly constructs an
+/// `AppearanceContext` from signing options and renders the template.
+#[tokio::test]
+async fn test_sign_pdf_with_custom_template() {
+    use std::sync::Arc;
+    use underskrift::visual::layout::{
+        SignatureLayout, SignatureRect, SignatureTemplate, VisibleSignatureConfig,
+    };
+    use underskrift::visual::layout::{Border, Color};
+
+    let pdf = test_pdf();
+    let signer = test_signer();
+
+    let template = SignatureTemplate::default();
+    let vis_config = VisibleSignatureConfig {
+        page: 0,
+        rect: SignatureRect::Absolute {
+            llx: 50.0,
+            lly: 650.0,
+            urx: 300.0,
+            ury: 720.0,
+        },
+        layout: SignatureLayout::Custom(Arc::new(template)),
+        background_color: Some(Color::white()),
+        border: Some(Border::default()),
+    };
+
+    let signed = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "TemplateSig1".to_string(),
+            reason: Some("Approval".to_string()),
+            location: Some("Stockholm".to_string()),
+            contact_info: Some("test@example.com".to_string()),
+            visible_signature: Some(vis_config),
+            ..Default::default()
+        })
+        .sign(&pdf, &signer)
+        .await
+        .expect("signing with custom template failed");
+
+    assert!(signed.len() > pdf.len());
+
+    let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
+    let sigs = underskrift::core::parser::extract_signatures(&doc)
+        .expect("should extract signatures");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(sigs[0].field_name, "TemplateSig1");
+
+    // The content stream should contain template text from the signing options
+    let signed_str = String::from_utf8_lossy(&signed);
+    // Template default lines include "Reason:" and "Location:" labels
+    // Since we provided reason and location, these should appear in the PDF
+    assert!(
+        signed_str.contains("Reason: Approval"),
+        "should contain rendered reason from template"
+    );
+    assert!(
+        signed_str.contains("Location: Stockholm"),
+        "should contain rendered location from template"
+    );
+    // Date should be present (auto-populated by signer pipeline)
+    assert!(
+        signed_str.contains("Date:"),
+        "should contain Date label from template"
+    );
+
+    // Should have Helvetica font references (template default)
+    assert!(
+        signed_str.contains("Helvetica"),
+        "should use Helvetica font from template"
+    );
+
+    println!(
+        "Custom template signature test passed. Signed PDF size: {} bytes",
+        signed.len()
+    );
+}

@@ -2,6 +2,95 @@
 //!
 //! This module defines the configuration types for positioning and laying out
 //! visible signature appearances on PDF pages.
+//!
+//! # Custom Appearances
+//!
+//! For full control over the signature appearance, implement the
+//! [`AppearanceRenderer`] trait and use [`SignatureLayout::Custom`].
+//! A built-in [`SignatureTemplate`] is provided for placeholder-based
+//! text substitution.
+
+use std::fmt;
+use std::sync::Arc;
+
+use crate::error::VisualError;
+
+/// Context passed to custom appearance renderers.
+///
+/// Contains the dimensions of the signature rectangle and metadata
+/// about the signing operation that renderers can use to generate
+/// content stream operators.
+#[derive(Debug, Clone)]
+pub struct AppearanceContext {
+    /// Width of the signature rectangle in PDF points.
+    pub width: f32,
+    /// Height of the signature rectangle in PDF points.
+    pub height: f32,
+    /// Optional signer name (from signing certificate or configuration).
+    pub signer_name: Option<String>,
+    /// Optional signing reason.
+    pub reason: Option<String>,
+    /// Optional signing location.
+    pub location: Option<String>,
+    /// Optional signing date as a formatted string.
+    pub date: Option<String>,
+    /// Optional contact information.
+    pub contact_info: Option<String>,
+}
+
+/// Trait for custom appearance renderers.
+///
+/// Implement this trait to produce a completely custom signature appearance.
+/// The renderer receives an [`AppearanceContext`] with dimensions and signing
+/// metadata, and must return raw PDF content stream bytes (drawing operators).
+///
+/// The returned bytes are used as the content stream of a Form XObject.
+/// The renderer is responsible for all drawing: text, graphics, colors, etc.
+///
+/// Standard 14 fonts (Helvetica, etc.) are available without embedding.
+/// Reference them in the content stream as `/F1`, `/F2`, etc. and return
+/// corresponding font resource names from your implementation.
+///
+/// # Example
+///
+/// ```rust
+/// use underskrift::visual::layout::{AppearanceRenderer, AppearanceContext, CustomAppearanceResult};
+/// use underskrift::error::VisualError;
+///
+/// struct MyRenderer;
+///
+/// impl AppearanceRenderer for MyRenderer {
+///     fn render(&self, ctx: &AppearanceContext) -> Result<CustomAppearanceResult, VisualError> {
+///         let mut stream = Vec::new();
+///         stream.extend_from_slice(b"q\n");
+///         stream.extend_from_slice(
+///             format!("0 0 {:.2} {:.2} re f\n", ctx.width, ctx.height).as_bytes()
+///         );
+///         stream.extend_from_slice(b"Q\n");
+///
+///         Ok(CustomAppearanceResult {
+///             content: stream,
+///             font_resources: vec![],
+///         })
+///     }
+/// }
+/// ```
+pub trait AppearanceRenderer: Send + Sync {
+    /// Render the signature appearance and return PDF content stream bytes.
+    fn render(&self, ctx: &AppearanceContext) -> Result<CustomAppearanceResult, VisualError>;
+}
+
+/// Result of a custom appearance rendering.
+///
+/// Contains the raw PDF content stream and font resources required.
+#[derive(Debug, Clone)]
+pub struct CustomAppearanceResult {
+    /// Raw PDF content stream bytes (drawing operators).
+    pub content: Vec<u8>,
+    /// Standard 14 font resources used in the content stream.
+    /// Each entry is `(resource_name, pdf_font_name)` — e.g., `("F1", "Helvetica")`.
+    pub font_resources: Vec<(String, String)>,
+}
 
 /// Configuration for a visible signature appearance.
 ///
@@ -76,7 +165,6 @@ impl Measurement {
 }
 
 /// What to render inside the visible signature.
-#[derive(Debug, Clone)]
 pub enum SignatureLayout {
     /// Text-only signature appearance.
     TextOnly(TextConfig),
@@ -93,6 +181,54 @@ pub enum SignatureLayout {
         /// How to arrange image and text.
         arrangement: Arrangement,
     },
+    /// Custom appearance rendered by a user-provided [`AppearanceRenderer`].
+    ///
+    /// Use this for full control over the signature appearance content stream.
+    /// Wrap your renderer in `Arc` so the layout remains `Clone`.
+    Custom(Arc<dyn AppearanceRenderer>),
+}
+
+impl fmt::Debug for SignatureLayout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SignatureLayout::TextOnly(tc) => f.debug_tuple("TextOnly").field(tc).finish(),
+            #[cfg(feature = "visual")]
+            SignatureLayout::ImageOnly(ic) => f.debug_tuple("ImageOnly").field(ic).finish(),
+            #[cfg(feature = "visual")]
+            SignatureLayout::ImageAndText {
+                image,
+                text,
+                arrangement,
+            } => f
+                .debug_struct("ImageAndText")
+                .field("image", image)
+                .field("text", text)
+                .field("arrangement", arrangement)
+                .finish(),
+            SignatureLayout::Custom(_) => f.debug_tuple("Custom").field(&"<renderer>").finish(),
+        }
+    }
+}
+
+impl Clone for SignatureLayout {
+    fn clone(&self) -> Self {
+        match self {
+            SignatureLayout::TextOnly(tc) => SignatureLayout::TextOnly(tc.clone()),
+            #[cfg(feature = "visual")]
+            SignatureLayout::ImageOnly(ic) => SignatureLayout::ImageOnly(ic.clone()),
+            #[cfg(feature = "visual")]
+            SignatureLayout::ImageAndText {
+                image,
+                text,
+                arrangement,
+            } => SignatureLayout::ImageAndText {
+                image: image.clone(),
+                text: text.clone(),
+                arrangement: *arrangement,
+            },
+            SignatureLayout::Custom(renderer) => SignatureLayout::Custom(Arc::clone(renderer)),
+        }
+    }
 }
 
 /// How to arrange image and text in a combined layout.
@@ -191,8 +327,21 @@ impl TextLine {
 pub enum FontSpec {
     /// One of the PDF standard 14 fonts. No embedding needed.
     Standard14(Standard14Font),
-    // Future: Embedded TrueType/OpenType font (requires subsetting)
-    // Embedded { data: Vec<u8>, name: String },
+    /// Embedded TrueType/OpenType font (requires subsetting).
+    ///
+    /// The font data is the raw `.ttf` or `.otf` file bytes. The font will be
+    /// subsetted to include only the glyphs actually used in the signature
+    /// appearance, embedded as a CIDFont/Type0 font in the PDF.
+    ///
+    /// Requires the `visual` feature flag.
+    #[cfg(feature = "visual")]
+    Embedded {
+        /// Raw TrueType/OpenType font file data.
+        data: Vec<u8>,
+        /// Font name to use as the BaseFont in the PDF (e.g., "NotoSans-Regular").
+        /// This should be a PostScript-style name without spaces.
+        name: String,
+    },
 }
 
 impl Default for FontSpec {
@@ -396,6 +545,270 @@ impl Default for Border {
     }
 }
 
+/// A built-in template-based signature appearance renderer.
+///
+/// Uses a simple placeholder substitution system to generate text-based
+/// signature appearances. Placeholders in the template string are replaced
+/// with values from the [`AppearanceContext`] at render time.
+///
+/// # Supported Placeholders
+///
+/// - `##SIGNER_NAME##` — Signer's name
+/// - `##DATE##` — Signing date
+/// - `##REASON##` — Signing reason
+/// - `##LOCATION##` — Signing location
+/// - `##CONTACT##` — Contact information
+///
+/// Lines where all placeholders resolve to empty/absent values are omitted.
+///
+/// # Example
+///
+/// ```rust
+/// use underskrift::visual::layout::{SignatureTemplate, SignatureLayout};
+/// use std::sync::Arc;
+///
+/// let template = SignatureTemplate::new(vec![
+///     "Digitally signed by ##SIGNER_NAME##".to_string(),
+///     "Date: ##DATE##".to_string(),
+///     "Reason: ##REASON##".to_string(),
+///     "Location: ##LOCATION##".to_string(),
+/// ])
+/// .font_size(9.0)
+/// .padding(5.0);
+///
+/// let layout = SignatureLayout::Custom(Arc::new(template));
+/// ```
+#[derive(Debug, Clone)]
+pub struct SignatureTemplate {
+    /// Template lines with `##PLACEHOLDER##` markers.
+    pub lines: Vec<String>,
+    /// Font name (Standard 14). Default: "Helvetica".
+    pub font_name: String,
+    /// Bold font name (Standard 14). Default: "Helvetica-Bold".
+    pub bold_font_name: String,
+    /// Font size in points. Default: 10.0
+    pub font_size: f32,
+    /// Text color. Default: black.
+    pub color: Color,
+    /// Padding inside the text area in points. Default: 4.0
+    pub padding: f32,
+    /// Line spacing multiplier. Default: 1.2
+    pub line_spacing: f32,
+    /// Whether the first line should be bold. Default: true
+    pub first_line_bold: bool,
+}
+
+impl Default for SignatureTemplate {
+    fn default() -> Self {
+        Self {
+            lines: vec![
+                "Digitally signed by ##SIGNER_NAME##".to_string(),
+                "Date: ##DATE##".to_string(),
+                "Reason: ##REASON##".to_string(),
+                "Location: ##LOCATION##".to_string(),
+            ],
+            font_name: "Helvetica".to_string(),
+            bold_font_name: "Helvetica-Bold".to_string(),
+            font_size: 10.0,
+            color: Color::black(),
+            padding: 4.0,
+            line_spacing: 1.2,
+            first_line_bold: true,
+        }
+    }
+}
+
+impl SignatureTemplate {
+    /// Create a new template with the given lines.
+    pub fn new(lines: Vec<String>) -> Self {
+        Self {
+            lines,
+            ..Default::default()
+        }
+    }
+
+    /// Set the font size.
+    pub fn font_size(mut self, size: f32) -> Self {
+        self.font_size = size;
+        self
+    }
+
+    /// Set the padding.
+    pub fn padding(mut self, padding: f32) -> Self {
+        self.padding = padding;
+        self
+    }
+
+    /// Set the text color.
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// Set the line spacing multiplier.
+    pub fn line_spacing(mut self, spacing: f32) -> Self {
+        self.line_spacing = spacing;
+        self
+    }
+
+    /// Set the font name (must be a Standard 14 PDF font name).
+    pub fn font_name(mut self, name: impl Into<String>) -> Self {
+        self.font_name = name.into();
+        self
+    }
+
+    /// Set the bold font name (must be a Standard 14 PDF font name).
+    pub fn bold_font_name(mut self, name: impl Into<String>) -> Self {
+        self.bold_font_name = name.into();
+        self
+    }
+
+    /// Set whether the first line is rendered bold.
+    pub fn first_line_bold(mut self, bold: bool) -> Self {
+        self.first_line_bold = bold;
+        self
+    }
+
+    /// Substitute placeholders in a template line with context values.
+    ///
+    /// Returns `None` if the line becomes empty after substitution
+    /// (all placeholders resolved to empty/absent values and no static text remains).
+    fn substitute_line(line: &str, ctx: &AppearanceContext) -> Option<String> {
+        let result = line
+            .replace("##SIGNER_NAME##", ctx.signer_name.as_deref().unwrap_or(""))
+            .replace("##DATE##", ctx.date.as_deref().unwrap_or(""))
+            .replace("##REASON##", ctx.reason.as_deref().unwrap_or(""))
+            .replace("##LOCATION##", ctx.location.as_deref().unwrap_or(""))
+            .replace("##CONTACT##", ctx.contact_info.as_deref().unwrap_or(""));
+
+        // Check if the line has meaningful content.
+        // A line like "Reason: " (label only, no value) should be omitted.
+        let trimmed = result.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        // Check if only a label prefix remains (ends with ": " or ":")
+        // by seeing if removing common label suffixes leaves nothing useful
+        let stripped = trimmed.trim_end_matches(':').trim_end_matches(": ").trim();
+        // If the original line had a placeholder and the result is just the label prefix, skip it
+        if line.contains("##") && stripped.len() == trimmed.trim_end_matches(':').trim().len() {
+            // The line had placeholders and the result still has content beyond labels
+            // This check catches "Reason: " → "Reason:" which should be skipped
+            if trimmed.ends_with(':') || trimmed.ends_with(": ") {
+                return None;
+            }
+        }
+
+        Some(result)
+    }
+
+    /// Escape special PDF text characters in a string.
+    fn escape_pdf_text(text: &str) -> String {
+        let mut escaped = String::with_capacity(text.len());
+        for ch in text.chars() {
+            match ch {
+                '\\' => escaped.push_str("\\\\"),
+                '(' => escaped.push_str("\\("),
+                ')' => escaped.push_str("\\)"),
+                _ => escaped.push(ch),
+            }
+        }
+        escaped
+    }
+}
+
+impl AppearanceRenderer for SignatureTemplate {
+    fn render(&self, ctx: &AppearanceContext) -> Result<CustomAppearanceResult, VisualError> {
+        // Substitute placeholders and filter empty lines
+        let resolved_lines: Vec<String> = self
+            .lines
+            .iter()
+            .filter_map(|line| Self::substitute_line(line, ctx))
+            .collect();
+
+        if resolved_lines.is_empty() {
+            return Ok(CustomAppearanceResult {
+                content: Vec::new(),
+                font_resources: vec![],
+            });
+        }
+
+        let mut stream = Vec::with_capacity(512);
+        let mut fonts: Vec<(String, String)> = Vec::new();
+
+        // Register fonts
+        let base_font_ref = "F1";
+        fonts.push((base_font_ref.to_string(), self.font_name.clone()));
+
+        let bold_font_ref = if self.first_line_bold && self.bold_font_name != self.font_name {
+            let name = "F2".to_string();
+            fonts.push((name.clone(), self.bold_font_name.clone()));
+            name
+        } else {
+            base_font_ref.to_string()
+        };
+
+        // Begin text block
+        stream.extend_from_slice(b"BT\n");
+
+        let padding = self.padding;
+        let font_size = self.font_size;
+        let line_height = font_size * self.line_spacing;
+
+        // Vertical layout: start from top, centered if content is shorter than area
+        let total_text_height = resolved_lines.len() as f32 * line_height;
+        let usable_height = ctx.height - 2.0 * padding;
+        let ascent_ratio = 0.72_f32; // Approximate for Helvetica family
+
+        let start_y = if total_text_height < usable_height {
+            let extra = usable_height - total_text_height;
+            ctx.height - padding - extra / 2.0 - font_size * ascent_ratio
+        } else {
+            ctx.height - padding - font_size * ascent_ratio
+        };
+
+        // Set text color
+        stream.extend_from_slice(
+            format!(
+                "{:.3} {:.3} {:.3} rg\n",
+                self.color.r, self.color.g, self.color.b
+            )
+            .as_bytes(),
+        );
+
+        for (i, line) in resolved_lines.iter().enumerate() {
+            let is_bold = self.first_line_bold && i == 0;
+            let font_ref = if is_bold {
+                &bold_font_ref
+            } else {
+                base_font_ref
+            };
+
+            stream.extend_from_slice(format!("/{} {:.1} Tf\n", font_ref, font_size).as_bytes());
+
+            let x = padding;
+            let y = start_y - i as f32 * line_height;
+
+            stream.extend_from_slice(format!("{:.2} {:.2} Td\n", x, y).as_bytes());
+
+            let escaped = Self::escape_pdf_text(line);
+            stream.extend_from_slice(format!("({}) Tj\n", escaped).as_bytes());
+
+            // Reset position for next line (absolute Td usage)
+            if i + 1 < resolved_lines.len() {
+                stream.extend_from_slice(format!("{:.2} {:.2} Td\n", -x, -y).as_bytes());
+            }
+        }
+
+        stream.extend_from_slice(b"ET\n");
+
+        Ok(CustomAppearanceResult {
+            content: stream,
+            font_resources: fonts,
+        })
+    }
+}
+
 impl SignatureRect {
     /// Convert to absolute PDF coordinates [llx, lly, urx, ury].
     ///
@@ -540,5 +953,106 @@ mod tests {
     fn test_border_default() {
         let border = Border::default();
         assert!((border.width - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_signature_template_default() {
+        let template = SignatureTemplate::default();
+        assert_eq!(template.lines.len(), 4);
+        assert!((template.font_size - 10.0).abs() < f32::EPSILON);
+        assert!(template.first_line_bold);
+    }
+
+    #[test]
+    fn test_signature_template_substitute_line() {
+        let ctx = AppearanceContext {
+            width: 200.0,
+            height: 50.0,
+            signer_name: Some("John Doe".to_string()),
+            reason: Some("Approval".to_string()),
+            location: None,
+            date: Some("2026-01-01".to_string()),
+            contact_info: None,
+        };
+
+        let result =
+            SignatureTemplate::substitute_line("Digitally signed by ##SIGNER_NAME##", &ctx);
+        assert_eq!(result, Some("Digitally signed by John Doe".to_string()));
+
+        let result = SignatureTemplate::substitute_line("Date: ##DATE##", &ctx);
+        assert_eq!(result, Some("Date: 2026-01-01".to_string()));
+
+        // Location is None, so "Location: " should be filtered out
+        let result = SignatureTemplate::substitute_line("Location: ##LOCATION##", &ctx);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_signature_template_render() {
+        let template = SignatureTemplate::default();
+        let ctx = AppearanceContext {
+            width: 200.0,
+            height: 60.0,
+            signer_name: Some("Alice".to_string()),
+            reason: Some("Review".to_string()),
+            location: Some("Stockholm".to_string()),
+            date: Some("2026-03-01".to_string()),
+            contact_info: None,
+        };
+
+        let result = template.render(&ctx).unwrap();
+        let content = String::from_utf8_lossy(&result.content);
+        assert!(content.contains("Digitally signed by Alice"));
+        assert!(content.contains("Date: 2026-03-01"));
+        assert!(content.contains("Reason: Review"));
+        assert!(content.contains("Location: Stockholm"));
+        // Should have font resources
+        assert!(!result.font_resources.is_empty());
+    }
+
+    #[test]
+    fn test_signature_template_render_empty_context() {
+        let template = SignatureTemplate::default();
+        let ctx = AppearanceContext {
+            width: 200.0,
+            height: 60.0,
+            signer_name: None,
+            reason: None,
+            location: None,
+            date: None,
+            contact_info: None,
+        };
+
+        let result = template.render(&ctx).unwrap();
+        // All lines should be filtered since all placeholders are empty
+        // "Digitally signed by " → ends with a space, but has content before it
+        // Actually "Digitally signed by " is not empty so it would render
+        let content = String::from_utf8_lossy(&result.content);
+        // At least the first line "Digitally signed by " has static text
+        // but "Date: ", "Reason: ", "Location: " should be skipped
+        assert!(!content.contains("Reason:"));
+        assert!(!content.contains("Location:"));
+    }
+
+    #[test]
+    fn test_signature_layout_custom_debug_clone() {
+        let template = SignatureTemplate::default();
+        let layout = SignatureLayout::Custom(Arc::new(template));
+
+        // Test Debug
+        let debug_str = format!("{:?}", layout);
+        assert!(debug_str.contains("Custom"));
+
+        // Test Clone
+        let cloned = layout.clone();
+        let debug_str2 = format!("{:?}", cloned);
+        assert!(debug_str2.contains("Custom"));
+    }
+
+    #[test]
+    fn test_signature_template_escape_pdf_text() {
+        let escaped = SignatureTemplate::escape_pdf_text("Test (with) parens & backslash\\");
+        assert!(escaped.contains("\\(with\\)"));
+        assert!(escaped.contains("backslash\\\\"));
     }
 }

@@ -64,6 +64,7 @@ pub mod report;
 // Public re-exports for convenience
 pub use error::PdfSignError;
 pub use signer::{PdfSigner, SigningOptions, PadesLevel, SubFilter};
+pub use cms::builder::{CmsProfile, SigningTimePlacement};
 pub use crypto::traits::CryptoSigner;
 pub use crypto::software::SoftwareSigner;
 pub use crypto::algorithm::{AlgorithmRegistry, DigestAlgorithm, SignatureAlgorithm};
@@ -82,10 +83,14 @@ pub use verify::SignatureVerifier;
 
 #[cfg(feature = "visual")]
 pub use visual::{
-    VisibleSignatureConfig, SignatureRect, SignatureLayout, TextConfig,
-    TextLine, FontSpec, Standard14Font, Measurement, TextAlignment,
-    Color, Border, Arrangement, AppearanceStream,
-    build_appearance, build_default_text_appearance, build_text_appearance,
-    ImageConfig, ImageFormat, ImageScale,
+    AppearanceContext, AppearanceRenderer, AppearanceStream, Arrangement, Border, Color,
+    CustomAppearanceResult, FontSpec, ImageConfig, ImageFormat, ImageResource, ImageScale,
+    Measurement, SignatureLayout, SignatureRect, SignatureTemplate, Standard14Font, TextAlignment,
+    TextConfig, TextLine, VisibleSignatureConfig,
+    build_appearance, build_appearance_with_context, build_default_text_appearance,
+    build_text_appearance,
     prepare_image, EmbeddedImage,
+    prepare_embedded_font, EmbeddedFontInfo, PreparedEmbeddedFont,
+    encode_cid_text, build_tounicode_cmap, build_w_array,
+    embedded_ascent_1000, embedded_descent_1000,
 };

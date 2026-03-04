@@ -336,6 +336,15 @@ pub enum VisualError {
     #[error("font error: {0}")]
     FontError(String),
 
+    #[error("font parsing error: {0}")]
+    FontParsing(String),
+
+    #[error("font subsetting error: {0}")]
+    FontSubsetting(String),
+
+    #[error("glyph not found for character U+{0:04X}")]
+    GlyphNotFound(u32),
+
     #[error("appearance generation error: {0}")]
     AppearanceError(String),
 }

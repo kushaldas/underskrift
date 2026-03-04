@@ -37,17 +37,28 @@ pub mod layout;
 
 // Re-export key types for convenience
 pub use appearance::{
-    build_appearance, build_default_text_appearance, build_text_appearance, AppearanceStream,
+    build_appearance, build_appearance_with_context, build_default_text_appearance,
+    build_text_appearance, AppearanceStream,
 };
 pub use layout::{
-    Arrangement, Border, Color, FontSpec, Measurement, SignatureLayout, SignatureRect,
-    Standard14Font, TextAlignment, TextConfig, TextLine, VisibleSignatureConfig,
+    AppearanceContext, AppearanceRenderer, Arrangement, Border, Color, CustomAppearanceResult,
+    FontSpec, Measurement, SignatureLayout, SignatureRect, SignatureTemplate, Standard14Font,
+    TextAlignment, TextConfig, TextLine, VisibleSignatureConfig,
 };
 
 #[cfg(feature = "visual")]
 pub use layout::{ImageConfig, ImageFormat, ImageScale};
 
 pub use font::{encode_pdf_text, FontMetrics};
+
+#[cfg(feature = "visual")]
+pub use font::{
+    build_tounicode_cmap, build_w_array, embedded_ascent_1000, embedded_descent_1000,
+    encode_cid_text, prepare_embedded_font, EmbeddedFontInfo, PreparedEmbeddedFont,
+};
+
+#[cfg(feature = "visual")]
+pub use appearance::ImageResource;
 
 #[cfg(feature = "visual")]
 pub use image::{prepare_image, EmbeddedImage};

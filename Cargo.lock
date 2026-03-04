@@ -2406,6 +2406,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "ttf-parser",
  "uppsala",
  "x509-cert",
 ]

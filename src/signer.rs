@@ -9,7 +9,7 @@ use lopdf::{Document, Object};
 #[cfg(feature = "visual")]
 use lopdf::{Dictionary, Stream};
 
-use crate::cms::builder::{CmsProfile, PdfCmsBuilder};
+use crate::cms::builder::{CmsProfile, PdfCmsBuilder, SigningTimePlacement};
 use crate::core::acroform;
 use crate::core::incremental::IncrementalWriter;
 use crate::core::parser;
@@ -20,7 +20,7 @@ use crate::crypto::traits::CryptoSigner;
 use crate::error::{CoreError, PdfSignError};
 
 #[cfg(feature = "visual")]
-use crate::visual::{self, VisibleSignatureConfig};
+use crate::visual::{self, AppearanceContext, SignatureLayout, VisibleSignatureConfig};
 
 /// PAdES conformance level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +109,21 @@ pub struct SigningOptions {
     /// Requires the `visual` feature flag for image-based appearances.
     #[cfg(feature = "visual")]
     pub visible_signature: Option<VisibleSignatureConfig>,
+    /// CMS signing time to embed in the CMS SignedData structure.
+    ///
+    /// When set, the `signingTime` attribute (OID 1.2.840.113549.1.9.5) is
+    /// placed according to `signing_time_placement`. When `None` (default),
+    /// no `signingTime` attribute is added to the CMS structure at all.
+    ///
+    /// This is distinct from the PDF `/M` dictionary field (which is unsigned).
+    pub cms_signing_time: Option<chrono::NaiveDateTime>,
+    /// Controls where the `signingTime` CMS attribute is placed.
+    ///
+    /// Only takes effect when `cms_signing_time` is set. See
+    /// [`SigningTimePlacement`] for the available options.
+    ///
+    /// Defaults to `SigningTimePlacement::Signed`.
+    pub signing_time_placement: SigningTimePlacement,
 }
 
 impl Default for SigningOptions {
@@ -129,6 +144,8 @@ impl Default for SigningOptions {
             algorithm_registry: None,
             #[cfg(feature = "visual")]
             visible_signature: None,
+            cms_signing_time: None,
+            signing_time_placement: SigningTimePlacement::default(),
         }
     }
 }
@@ -245,8 +262,21 @@ impl PdfSigner {
             // Get page dimensions for coordinate conversion
             let (page_width, page_height) = get_page_dimensions(&doc, self.options.page)?;
 
-            // Generate the appearance stream
-            let appearance = visual::build_appearance(vis_config, page_width, page_height)?;
+            // For Custom layouts, build an AppearanceContext from signing options
+            let appearance = if matches!(&vis_config.layout, SignatureLayout::Custom(_)) {
+                let ctx = AppearanceContext {
+                    width: 0.0,  // will be overridden by build_appearance_with_context
+                    height: 0.0, // will be overridden by build_appearance_with_context
+                    signer_name: None, // not easily available without parsing cert
+                    reason: self.options.reason.clone(),
+                    location: self.options.location.clone(),
+                    date: Some(chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+                    contact_info: self.options.contact_info.clone(),
+                };
+                visual::build_appearance_with_context(vis_config, page_width, page_height, Some(&ctx))?
+            } else {
+                visual::build_appearance(vis_config, page_width, page_height)?
+            };
 
             // Compute the absolute rect for the annotation
             let abs_rect = vis_config.rect.to_absolute(page_width, page_height);
@@ -279,7 +309,7 @@ impl PdfSigner {
         let mut appearance_object_ids: Vec<lopdf::ObjectId> = Vec::new();
         #[cfg(feature = "visual")]
         if let Some((appearance, _)) = appearance_data {
-            // Build font resource dictionaries
+            // Build font resource dictionaries for Standard 14 fonts
             let mut font_dict = Dictionary::new();
             for (res_name, pdf_font_name) in &appearance.font_resources {
                 let mut fd = Dictionary::new();
@@ -297,9 +327,217 @@ impl PdfSigner {
                 );
             }
 
+            // Build CIDFont/Type0 font dictionaries for embedded fonts
+            for emb_font_res in &appearance.embedded_font_resources {
+                let prepared = &emb_font_res.font;
+                let info = &prepared.info;
+
+                // 1. Embed the subsetted font as a FontFile2 stream
+                let mut font_file_dict = Dictionary::new();
+                font_file_dict.set("Length1", Object::Integer(prepared.subset_data.len() as i64));
+                let mut font_file_stream =
+                    Stream::new(font_file_dict, prepared.subset_data.clone());
+                let _ = font_file_stream.compress();
+                let font_file_id = doc.add_object(Object::Stream(font_file_stream));
+                appearance_object_ids.push(font_file_id);
+
+                // 2. Build the FontDescriptor
+                let ascent_1000 = visual::font::embedded_ascent_1000(info);
+                let descent_1000 = visual::font::embedded_descent_1000(info);
+                let mut font_desc = Dictionary::new();
+                font_desc.set("Type", Object::Name(b"FontDescriptor".to_vec()));
+                font_desc.set(
+                    "FontName",
+                    Object::Name(info.name.as_bytes().to_vec()),
+                );
+                font_desc.set("Flags", Object::Integer(info.flags as i64));
+                font_desc.set(
+                    "FontBBox",
+                    Object::Array(vec![
+                        Object::Integer(
+                            info.bbox[0] as i64 * 1000 / info.units_per_em as i64,
+                        ),
+                        Object::Integer(
+                            info.bbox[1] as i64 * 1000 / info.units_per_em as i64,
+                        ),
+                        Object::Integer(
+                            info.bbox[2] as i64 * 1000 / info.units_per_em as i64,
+                        ),
+                        Object::Integer(
+                            info.bbox[3] as i64 * 1000 / info.units_per_em as i64,
+                        ),
+                    ]),
+                );
+                font_desc.set(
+                    "ItalicAngle",
+                    Object::Real(info.italic_angle),
+                );
+                font_desc.set("Ascent", Object::Integer(ascent_1000 as i64));
+                font_desc.set("Descent", Object::Integer(descent_1000 as i64));
+                font_desc.set(
+                    "CapHeight",
+                    Object::Integer(
+                        info.cap_height as i64 * 1000 / info.units_per_em as i64,
+                    ),
+                );
+                font_desc.set("StemV", Object::Integer(info.stem_v as i64));
+                font_desc.set("FontFile2", Object::Reference(font_file_id));
+                let font_desc_id = doc.add_object(Object::Dictionary(font_desc));
+                appearance_object_ids.push(font_desc_id);
+
+                // 3. Build the CIDFont dictionary (CIDFontType2 for TrueType)
+                let w_array_str =
+                    visual::font::build_w_array(&prepared.cid_widths, prepared.default_width);
+                // Parse the W array string into lopdf objects
+                let w_array = parse_w_array_string(&w_array_str);
+
+                let mut cid_system_info = Dictionary::new();
+                cid_system_info.set(
+                    "Registry",
+                    Object::String(b"Adobe".to_vec(), lopdf::StringFormat::Literal),
+                );
+                cid_system_info.set(
+                    "Ordering",
+                    Object::String(b"Identity".to_vec(), lopdf::StringFormat::Literal),
+                );
+                cid_system_info.set("Supplement", Object::Integer(0));
+
+                let mut cid_font = Dictionary::new();
+                cid_font.set("Type", Object::Name(b"Font".to_vec()));
+                cid_font.set("Subtype", Object::Name(b"CIDFontType2".to_vec()));
+                cid_font.set(
+                    "BaseFont",
+                    Object::Name(info.name.as_bytes().to_vec()),
+                );
+                cid_font.set(
+                    "CIDSystemInfo",
+                    Object::Dictionary(cid_system_info),
+                );
+                cid_font.set("W", w_array);
+                cid_font.set(
+                    "DW",
+                    Object::Integer(prepared.default_width as i64),
+                );
+                cid_font.set("FontDescriptor", Object::Reference(font_desc_id));
+                // CIDToGIDMap: Identity mapping (CID = GID in the subsetted font)
+                cid_font.set(
+                    "CIDToGIDMap",
+                    Object::Name(b"Identity".to_vec()),
+                );
+                let cid_font_id = doc.add_object(Object::Dictionary(cid_font));
+                appearance_object_ids.push(cid_font_id);
+
+                // 4. Build the ToUnicode CMap stream
+                let tounicode_data =
+                    visual::font::build_tounicode_cmap(&info.name, &prepared.char_to_cid);
+                let tounicode_stream = Stream::new(Dictionary::new(), tounicode_data);
+                let tounicode_id = doc.add_object(Object::Stream(tounicode_stream));
+                appearance_object_ids.push(tounicode_id);
+
+                // 5. Build the Type0 font dictionary
+                let mut type0 = Dictionary::new();
+                type0.set("Type", Object::Name(b"Font".to_vec()));
+                type0.set("Subtype", Object::Name(b"Type0".to_vec()));
+                type0.set(
+                    "BaseFont",
+                    Object::Name(info.name.as_bytes().to_vec()),
+                );
+                type0.set("Encoding", Object::Name(b"Identity-H".to_vec()));
+                type0.set(
+                    "DescendantFonts",
+                    Object::Array(vec![Object::Reference(cid_font_id)]),
+                );
+                type0.set("ToUnicode", Object::Reference(tounicode_id));
+                let type0_id = doc.add_object(Object::Dictionary(type0));
+                appearance_object_ids.push(type0_id);
+
+                // Wire the Type0 font into the font resource dictionary
+                font_dict.set(
+                    emb_font_res.resource_name.as_bytes(),
+                    Object::Reference(type0_id),
+                );
+            }
+
+            // Build Image XObject streams from image_resources
+            let mut xobj_res_dict = Dictionary::new();
+            for img_res in &appearance.image_resources {
+                let img = &img_res.image;
+
+                // If the image has alpha, create an SMask XObject first
+                let smask_id = if img.has_alpha {
+                    if let Some(ref alpha_data) = img.alpha_data {
+                        let mut smask_dict = Dictionary::new();
+                        smask_dict.set("Type", Object::Name(b"XObject".to_vec()));
+                        smask_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+                        smask_dict.set("Width", Object::Integer(img.width as i64));
+                        smask_dict.set("Height", Object::Integer(img.height as i64));
+                        smask_dict.set("BitsPerComponent", Object::Integer(8));
+                        smask_dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+
+                        // Compress the alpha data with FlateDecode
+                        let mut smask_stream = Stream::new(smask_dict, alpha_data.clone());
+                        let _ = smask_stream.compress();
+                        let sid = doc.add_object(Object::Stream(smask_stream));
+                        appearance_object_ids.push(sid);
+                        Some(sid)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Build the Image XObject
+                let mut img_dict = Dictionary::new();
+                img_dict.set("Type", Object::Name(b"XObject".to_vec()));
+                img_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+                img_dict.set("Width", Object::Integer(img.width as i64));
+                img_dict.set("Height", Object::Integer(img.height as i64));
+                img_dict.set(
+                    "BitsPerComponent",
+                    Object::Integer(img.bits_per_component as i64),
+                );
+                img_dict.set(
+                    "ColorSpace",
+                    Object::Name(img.color_space.as_bytes().to_vec()),
+                );
+
+                if let Some(sid) = smask_id {
+                    img_dict.set("SMask", Object::Reference(sid));
+                }
+
+                // For JPEG (DCTDecode), embed raw data with the filter set.
+                // For PNG (FlateDecode), compress the raw sample data.
+                let img_stream = if img.filter == "DCTDecode" {
+                    // JPEG: set filter and use raw JPEG data as-is
+                    img_dict.set(
+                        "Filter",
+                        Object::Name(b"DCTDecode".to_vec()),
+                    );
+                    Stream::new(img_dict, img.data.clone())
+                } else {
+                    // Raw pixel data: use lopdf's compress() to apply FlateDecode
+                    let mut s = Stream::new(img_dict, img.data.clone());
+                    let _ = s.compress(); // adds /Filter /FlateDecode automatically
+                    s
+                };
+
+                let img_id = doc.add_object(Object::Stream(img_stream));
+                appearance_object_ids.push(img_id);
+                xobj_res_dict.set(
+                    img_res.resource_name.as_bytes(),
+                    Object::Reference(img_id),
+                );
+            }
+
             // Build the resource dictionary for the Form XObject
             let mut resources = Dictionary::new();
-            resources.set("Font", Object::Dictionary(font_dict));
+            if !font_dict.is_empty() {
+                resources.set("Font", Object::Dictionary(font_dict));
+            }
+            if !xobj_res_dict.is_empty() {
+                resources.set("XObject", Object::Dictionary(xobj_res_dict));
+            }
 
             // Build the Form XObject stream
             let mut xobj_dict = Dictionary::new();
@@ -414,7 +652,13 @@ impl PdfSigner {
             SubFilter::Pades => CmsProfile::Pades,
             SubFilter::Pkcs7 => CmsProfile::Traditional,
         };
-        let cms_builder = PdfCmsBuilder::new(signer).profile(cms_profile);
+        let cms_builder = PdfCmsBuilder::new(signer)
+            .profile(cms_profile)
+            .signing_time_placement(self.options.signing_time_placement);
+        let cms_builder = match self.options.cms_signing_time {
+            Some(t) => cms_builder.signing_time(t),
+            None => cms_builder,
+        };
         let cms_der = cms_builder.build(&data_hash)?;
 
         // Step 11: Check that the CMS signature fits in the allocated space
@@ -506,4 +750,81 @@ fn get_page_dimensions(doc: &Document, page_index: u32) -> Result<(f32, f32), Pd
     // Fallback to US Letter
     log::warn!("Could not determine page dimensions, using US Letter (612x792)");
     Ok((612.0, 792.0))
+}
+
+/// Parse a /W array string (from `build_w_array`) into a lopdf Object.
+///
+/// The format is `[cid1 [w1] cid2 [w2] ...]` or `[]`.
+/// We parse this manually since lopdf doesn't have a string parser.
+#[cfg(feature = "visual")]
+fn parse_w_array_string(w_str: &str) -> Object {
+    // Simple parser for the W array format produced by build_w_array
+    let trimmed = w_str.trim();
+    if trimmed == "[]" {
+        return Object::Array(Vec::new());
+    }
+
+    // Strip outer brackets
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+
+    let mut result = Vec::new();
+    let mut chars = inner.chars().peekable();
+
+    while chars.peek().is_some() {
+        // Skip whitespace
+        while chars.peek() == Some(&' ') {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+
+        if chars.peek() == Some(&'[') {
+            // Parse inner array [w]
+            chars.next(); // consume '['
+            let mut num_str = String::new();
+            let mut inner_arr = Vec::new();
+            while let Some(&ch) = chars.peek() {
+                if ch == ']' {
+                    chars.next();
+                    if !num_str.is_empty() {
+                        if let Ok(n) = num_str.trim().parse::<i64>() {
+                            inner_arr.push(Object::Integer(n));
+                        }
+                    }
+                    break;
+                } else if ch == ' ' {
+                    if !num_str.is_empty() {
+                        if let Ok(n) = num_str.trim().parse::<i64>() {
+                            inner_arr.push(Object::Integer(n));
+                        }
+                        num_str.clear();
+                    }
+                    chars.next();
+                } else {
+                    num_str.push(ch);
+                    chars.next();
+                }
+            }
+            result.push(Object::Array(inner_arr));
+        } else {
+            // Parse a number (CID)
+            let mut num_str = String::new();
+            while let Some(&ch) = chars.peek() {
+                if ch == ' ' || ch == '[' {
+                    break;
+                }
+                num_str.push(ch);
+                chars.next();
+            }
+            if let Ok(n) = num_str.parse::<i64>() {
+                result.push(Object::Integer(n));
+            }
+        }
+    }
+
+    Object::Array(result)
 }

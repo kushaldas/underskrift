@@ -58,6 +58,14 @@ pub struct CmsVerifyResult {
     /// as embedded in the CMS signed attributes. Distinct from the PDF `/M`
     /// dictionary field (which is unsigned and trivially forgeable).
     pub cms_signing_time: Option<DateTime<Utc>>,
+    /// CMS signing-time from the signingTime unsigned attribute (OID 1.2.840.113549.1.9.5).
+    ///
+    /// Some signing workflows place `signingTime` in unsigned attributes instead of
+    /// (or in addition to) signed attributes. In PAdES mode the signed copy is always
+    /// omitted, so this may be the only CMS-level timestamp available.
+    ///
+    /// `None` if the attribute is absent from unsigned attributes.
+    pub cms_signing_time_unsigned: Option<DateTime<Utc>>,
     /// Whether the ESS signingCertificateV2 attribute (RFC 5035) matches the signer cert.
     ///
     /// `Some(true)` — attribute present and cert hash matches.
@@ -177,6 +185,9 @@ pub fn verify_cms(cms_bytes: &[u8], data_hash: &[u8]) -> Result<CmsVerifyResult,
     // Step 8b: Extract CMS signingTime from signed attributes
     let cms_signing_time = extract_signing_time(signer_info);
 
+    // Step 8b2: Extract CMS signingTime from unsigned attributes
+    let cms_signing_time_unsigned = extract_signing_time_unsigned(signer_info);
+
     // Step 8c: Verify ESSCertIDv2 (signingCertificateV2) if present
     let ess_cert_id_match = verify_ess_cert_id_v2(signer_info, &signer_certificate, &mut issues);
 
@@ -215,6 +226,7 @@ pub fn verify_cms(cms_bytes: &[u8], data_hash: &[u8]) -> Result<CmsVerifyResult,
         algorithm_protection_ok,
         algorithm_protection,
         cms_signing_time,
+        cms_signing_time_unsigned,
         ess_cert_id_match,
         signature_timestamp_token,
         signature_value,
@@ -299,6 +311,27 @@ fn extract_message_digest(signer_info: &SignerInfo) -> Option<Vec<u8>> {
 fn extract_signing_time(signer_info: &SignerInfo) -> Option<DateTime<Utc>> {
     let signed_attrs = signer_info.signed_attrs.as_ref()?;
     for attr in signed_attrs.iter() {
+        if attr.oid == rfc5911::ID_SIGNING_TIME {
+            if let Some(value) = attr.values.iter().next() {
+                let value_der = value.to_der().ok()?;
+                return parse_cms_time(&value_der);
+            }
+        }
+    }
+    None
+}
+
+/// Extract the CMS `signingTime` attribute value from unsigned attributes.
+///
+/// Some signing workflows place `signingTime` in unsigned attributes (e.g.,
+/// when `SigningTimePlacement::Unsigned` or `Both` is used). In PAdES mode,
+/// `signingTime` is omitted from signed attributes per ETSI EN 319 122-1,
+/// so the unsigned copy may be the only CMS-level timestamp.
+///
+/// Returns `None` if the attribute is absent from unsigned attributes or cannot be parsed.
+fn extract_signing_time_unsigned(signer_info: &SignerInfo) -> Option<DateTime<Utc>> {
+    let unsigned_attrs = signer_info.unsigned_attrs.as_ref()?;
+    for attr in unsigned_attrs.iter() {
         if attr.oid == rfc5911::ID_SIGNING_TIME {
             if let Some(value) = attr.values.iter().next() {
                 let value_der = value.to_der().ok()?;
@@ -2076,5 +2109,164 @@ mod tests {
             format!("{err}").contains("no signer infos"),
             "error should mention no signer infos, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_extract_signing_time_unsigned_from_cms() {
+        // Build CMS with signing_time_placement = Unsigned, then verify
+        // extract_signing_time_unsigned finds the time.
+        let p12_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/signer.p12");
+        let signer = crate::crypto::software::SoftwareSigner::from_pkcs12_file(p12_path, "test123")
+            .expect("load PKCS#12");
+
+        let time = chrono::NaiveDate::from_ymd_opt(2025, 6, 15)
+            .unwrap()
+            .and_hms_opt(14, 30, 0)
+            .unwrap();
+        let cms_der = crate::cms::builder::PdfCmsBuilder::new(&signer)
+            .profile(crate::cms::builder::CmsProfile::Traditional)
+            .signing_time(time)
+            .signing_time_placement(crate::cms::builder::SigningTimePlacement::Unsigned)
+            .build(&vec![0xBB; 32])
+            .expect("build");
+
+        let content_info = ContentInfo::from_der(&cms_der).unwrap();
+        let sd_bytes = content_info.content.to_der().unwrap();
+        let signed_data = SignedData::from_der(&sd_bytes).unwrap();
+        let si = &signed_data.signer_infos.0.as_slice()[0];
+
+        // Signed attrs should NOT have signingTime
+        let signed_time = extract_signing_time(si);
+        assert!(
+            signed_time.is_none(),
+            "signingTime should NOT be in signed attrs with Unsigned placement"
+        );
+
+        // Unsigned attrs SHOULD have signingTime
+        let unsigned_time = extract_signing_time_unsigned(si);
+        assert!(
+            unsigned_time.is_some(),
+            "signingTime should be in unsigned attrs with Unsigned placement"
+        );
+        let ut = unsigned_time.unwrap();
+        assert_eq!(ut.year(), 2025);
+        assert_eq!(ut.month(), 6);
+        assert_eq!(ut.day(), 15);
+        assert_eq!(ut.hour(), 14);
+        assert_eq!(ut.minute(), 30);
+    }
+
+    #[test]
+    fn test_extract_signing_time_unsigned_absent() {
+        // Default placement (Signed): unsigned attrs are None, so extract_signing_time_unsigned
+        // should return None.
+        let p12_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/signer.p12");
+        let signer = crate::crypto::software::SoftwareSigner::from_pkcs12_file(p12_path, "test123")
+            .expect("load PKCS#12");
+
+        let time = chrono::NaiveDate::from_ymd_opt(2025, 6, 15)
+            .unwrap()
+            .and_hms_opt(14, 30, 0)
+            .unwrap();
+        let cms_der = crate::cms::builder::PdfCmsBuilder::new(&signer)
+            .profile(crate::cms::builder::CmsProfile::Traditional)
+            .signing_time(time)
+            // default placement = Signed
+            .build(&vec![0xBB; 32])
+            .expect("build");
+
+        let content_info = ContentInfo::from_der(&cms_der).unwrap();
+        let sd_bytes = content_info.content.to_der().unwrap();
+        let signed_data = SignedData::from_der(&sd_bytes).unwrap();
+        let si = &signed_data.signer_infos.0.as_slice()[0];
+
+        let unsigned_time = extract_signing_time_unsigned(si);
+        assert!(
+            unsigned_time.is_none(),
+            "unsigned signing time should be None with default Signed placement"
+        );
+    }
+
+    #[test]
+    fn test_verify_cms_result_has_unsigned_signing_time() {
+        // End-to-end: verify_cms should populate cms_signing_time_unsigned field
+        let p12_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/signer.p12");
+        let signer = crate::crypto::software::SoftwareSigner::from_pkcs12_file(p12_path, "test123")
+            .expect("load PKCS#12");
+
+        let time = chrono::NaiveDate::from_ymd_opt(2025, 6, 15)
+            .unwrap()
+            .and_hms_opt(14, 30, 0)
+            .unwrap();
+
+        // Build CMS with Both placement: signed + unsigned both have signingTime
+        let fake_hash = vec![0xBB; 32];
+        let cms_der = crate::cms::builder::PdfCmsBuilder::new(&signer)
+            .profile(crate::cms::builder::CmsProfile::Traditional)
+            .signing_time(time)
+            .signing_time_placement(crate::cms::builder::SigningTimePlacement::Both)
+            .build(&fake_hash)
+            .expect("build");
+
+        // verify_cms uses the same fake_hash as data_hash
+        let result = verify_cms(&cms_der, &fake_hash).expect("verify_cms");
+
+        // Signed signing time should be present
+        assert!(
+            result.cms_signing_time.is_some(),
+            "cms_signing_time should be Some with Both placement"
+        );
+
+        // Unsigned signing time should also be present
+        assert!(
+            result.cms_signing_time_unsigned.is_some(),
+            "cms_signing_time_unsigned should be Some with Both placement"
+        );
+
+        // Both should have the same time
+        let signed_t = result.cms_signing_time.unwrap();
+        let unsigned_t = result.cms_signing_time_unsigned.unwrap();
+        assert_eq!(
+            signed_t, unsigned_t,
+            "signed and unsigned signing times should match"
+        );
+        assert_eq!(signed_t.year(), 2025);
+    }
+
+    #[test]
+    fn test_verify_cms_result_unsigned_only() {
+        // verify_cms with Unsigned placement: cms_signing_time is None,
+        // cms_signing_time_unsigned is Some.
+        let p12_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/signer.p12");
+        let signer = crate::crypto::software::SoftwareSigner::from_pkcs12_file(p12_path, "test123")
+            .expect("load PKCS#12");
+
+        let time = chrono::NaiveDate::from_ymd_opt(2025, 6, 15)
+            .unwrap()
+            .and_hms_opt(14, 30, 0)
+            .unwrap();
+
+        let fake_hash = vec![0xBB; 32];
+        let cms_der = crate::cms::builder::PdfCmsBuilder::new(&signer)
+            .profile(crate::cms::builder::CmsProfile::Traditional)
+            .signing_time(time)
+            .signing_time_placement(crate::cms::builder::SigningTimePlacement::Unsigned)
+            .build(&fake_hash)
+            .expect("build");
+
+        let result = verify_cms(&cms_der, &fake_hash).expect("verify_cms");
+
+        assert!(
+            result.cms_signing_time.is_none(),
+            "cms_signing_time should be None with Unsigned placement"
+        );
+        assert!(
+            result.cms_signing_time_unsigned.is_some(),
+            "cms_signing_time_unsigned should be Some with Unsigned placement"
+        );
+        let ut = result.cms_signing_time_unsigned.unwrap();
+        assert_eq!(ut.year(), 2025);
+        assert_eq!(ut.month(), 6);
+        assert_eq!(ut.hour(), 14);
     }
 }
