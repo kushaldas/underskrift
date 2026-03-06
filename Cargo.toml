@@ -1,6 +1,6 @@
 [package]
 name = "underskrift"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.75"
 description = "PDF digital signing library — PAdES B-B through B-LTA, PKCS#7, visible/invisible signatures, LTV, and verification"
