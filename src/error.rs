@@ -55,6 +55,10 @@ pub enum PdfSignError {
 
     #[error("Visual signature error: {0}")]
     Visual(#[from] VisualError),
+
+    #[cfg(feature = "inspect")]
+    #[error("Inspect error: {0}")]
+    Inspect(#[from] InspectError),
 }
 
 /// Errors from the `core` module — PDF structure manipulation.
@@ -347,4 +351,24 @@ pub enum VisualError {
 
     #[error("appearance generation error: {0}")]
     AppearanceError(String),
+}
+
+/// Errors from the `inspect` module — PDF object inspection and metadata extraction.
+#[cfg(feature = "inspect")]
+#[derive(Debug, Error)]
+pub enum InspectError {
+    #[error("failed to parse PDF: {0}")]
+    PdfParse(String),
+
+    #[error("object {0} not found")]
+    ObjectNotFound(u32),
+
+    #[error("object {0} is not a dictionary")]
+    NotADictionary(u32),
+
+    #[error("object {0} has no /Contents entry")]
+    NoContents(u32),
+
+    #[error("object {0} has empty /Contents")]
+    EmptyContents(u32),
 }

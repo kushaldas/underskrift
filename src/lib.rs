@@ -61,6 +61,9 @@ pub mod svt;
 #[cfg(feature = "report")]
 pub mod report;
 
+#[cfg(feature = "inspect")]
+pub mod inspect;
+
 // Public re-exports for convenience
 pub use error::PdfSignError;
 pub use signer::{PdfSigner, SigningOptions, PadesLevel, SubFilter};
@@ -93,4 +96,11 @@ pub use visual::{
     prepare_embedded_font, EmbeddedFontInfo, PreparedEmbeddedFont,
     encode_cid_text, build_tounicode_cmap, build_w_array,
     embedded_ascent_1000, embedded_descent_1000,
+};
+
+#[cfg(feature = "inspect")]
+pub use inspect::{
+    PdfInspection, PdfObjectInfo, ObjectKind, inspect_pdf,
+    PdfSignatureInspection, SignatureFieldInfo, DssInfo, DssVriEntry,
+    inspect_signatures, extract_cms_by_object,
 };

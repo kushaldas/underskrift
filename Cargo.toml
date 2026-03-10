@@ -1,6 +1,6 @@
 [package]
 name = "underskrift"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.75"
 description = "PDF digital signing library — PAdES B-B through B-LTA, PKCS#7, visible/invisible signatures, LTV, and verification"
@@ -10,7 +10,7 @@ keywords = ["pdf", "signing", "pades", "pkcs7", "digital-signature"]
 categories = ["cryptography", "parser-implementations"]
 
 [features]
-default = ["tsp", "ltv", "visual", "verify", "blocking", "saci", "svt", "report"]
+default = ["tsp", "ltv", "visual", "verify", "blocking", "saci", "svt", "report", "inspect"]
 
 # Network-dependent features
 tsp      = ["dep:reqwest", "dep:tokio"]       # RFC 3161 timestamping
@@ -23,6 +23,7 @@ verify   = []                                  # Signature verification & valida
 saci     = ["dep:uppsala"]                      # SACI AuthnContext X.509 extension parsing (RFC 7773)
 svt      = ["dep:josekit", "dep:serde", "dep:serde_json"]  # RFC 9321 Signature Validation Tokens
 report   = ["verify", "dep:uppsala"]                      # ETSI TS 119 102-2 validation reports
+inspect  = ["dep:serde_json"]                              # PDF object inspection and metadata extraction
 
 [dependencies]
 # PDF parsing and manipulation
