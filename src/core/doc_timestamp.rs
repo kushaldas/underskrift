@@ -46,10 +46,7 @@ pub fn build_doc_timestamp_dict(contents_size: usize) -> Dictionary {
     let mut dict = Dictionary::new();
     dict.set("Type", Object::Name(b"DocTimeStamp".to_vec()));
     dict.set("Filter", Object::Name(b"Adobe.PPKLite".to_vec()));
-    dict.set(
-        "SubFilter",
-        Object::Name(b"ETSI.RFC3161".to_vec()),
-    );
+    dict.set("SubFilter", Object::Name(b"ETSI.RFC3161".to_vec()));
 
     // ByteRange placeholder — will be backpatched after serialization
     dict.set(
@@ -271,10 +268,7 @@ pub async fn add_document_timestamp(
     );
 
     // Step 3: Request timestamp from TSA
-    let token_der = tsa
-        .timestamp(&data_hash)
-        .await
-        .map_err(|e| PdfSignError::Tsp(e))?;
+    let token_der = tsa.timestamp(&data_hash).await.map_err(PdfSignError::Tsp)?;
 
     log::debug!(
         "DocTimeStamp: received timestamp token ({} bytes)",
@@ -312,7 +306,7 @@ pub async fn add_document_timestamp_pool(
     let token_der = tsa_pool
         .timestamp(&data_hash)
         .await
-        .map_err(|e| PdfSignError::Tsp(e))?;
+        .map_err(PdfSignError::Tsp)?;
 
     inject_timestamp_token(output, &byte_range, &token_der, options.content_size)
 }
@@ -414,13 +408,8 @@ mod tests {
         // Create a fake "timestamp token" (not a real one, just for testing injection)
         let fake_token = vec![0x30, 0x82, 0x01, 0x00]; // 4 bytes
 
-        let result = inject_timestamp_token(
-            output,
-            &byte_range,
-            &fake_token,
-            options.content_size,
-        )
-        .unwrap();
+        let result =
+            inject_timestamp_token(output, &byte_range, &fake_token, options.content_size).unwrap();
 
         // The injected hex should appear in the output
         let hex_token = hex::encode_upper(&fake_token);
@@ -446,12 +435,7 @@ mod tests {
         // Create a token larger than the allocated space
         let big_token = vec![0xAA; 32];
 
-        let result = inject_timestamp_token(
-            output,
-            &byte_range,
-            &big_token,
-            options.content_size,
-        );
+        let result = inject_timestamp_token(output, &byte_range, &big_token, options.content_size);
 
         assert!(result.is_err());
     }

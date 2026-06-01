@@ -189,7 +189,7 @@ impl SvtIssuer {
         // Build JWT payload
         let mut payload = JwtPayload::new();
         payload.set_issuer(&model.issuer_id);
-        payload.set_jwt_id(&generate_jti());
+        payload.set_jwt_id(generate_jti());
 
         let now = SystemTime::now();
         payload.set_issued_at(&now);
@@ -226,7 +226,7 @@ impl SvtIssuer {
                 // kid = hash of signing cert
                 let digest_uri = self.digest_algo_uri();
                 let hash = algo::hash_with_uri(digest_uri, &self.certificate_chain_der[0])?;
-                header.set_key_id(&B64.encode(&hash));
+                header.set_key_id(B64.encode(&hash));
             } else {
                 // x5c = base64 cert chain
                 let x5c: Vec<Value> = self
@@ -406,7 +406,9 @@ mod tests {
             certificate_chain_der: vec![fake_cert.clone()],
         };
 
-        let cert_ref = issuer.build_cert_ref(&[fake_cert.clone()], false).unwrap();
+        let cert_ref = issuer
+            .build_cert_ref(std::slice::from_ref(&fake_cert), false)
+            .unwrap();
         assert_eq!(cert_ref.ref_type, CertRefType::Chain);
         assert_eq!(cert_ref.cert_ref.len(), 1);
         assert_eq!(cert_ref.cert_ref[0], B64.encode(&fake_cert));
@@ -421,7 +423,9 @@ mod tests {
             certificate_chain_der: vec![fake_cert.clone()],
         };
 
-        let cert_ref = issuer.build_cert_ref(&[fake_cert.clone()], true).unwrap();
+        let cert_ref = issuer
+            .build_cert_ref(std::slice::from_ref(&fake_cert), true)
+            .unwrap();
         assert_eq!(cert_ref.ref_type, CertRefType::ChainHash);
         assert_eq!(cert_ref.cert_ref.len(), 1);
         // Verify it's a base64-encoded SHA-256 hash (32 bytes → 44 chars base64)

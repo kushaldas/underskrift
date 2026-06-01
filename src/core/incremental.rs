@@ -120,7 +120,6 @@ impl IncrementalWriter {
 
         // Backpatch ByteRange with final values
         let total_len = buf.len();
-        let byte_range = byte_range;
         byte_range.backpatch(&mut buf, total_len)?;
 
         Ok((buf, byte_range))
@@ -133,7 +132,7 @@ impl IncrementalWriter {
         id: ObjectId,
         object: &Object,
     ) -> Result<(), CoreError> {
-        write!(buf, "{} {} obj\n", id.0, id.1)
+        writeln!(buf, "{} {} obj", id.0, id.1)
             .map_err(|e| CoreError::InvalidStructure(format!("write error: {e}")))?;
         self.serialize_object(buf, object)?;
         write!(buf, "\nendobj\n")
@@ -148,7 +147,7 @@ impl IncrementalWriter {
         id: ObjectId,
         object: &Object,
     ) -> Result<ByteRange, CoreError> {
-        write!(buf, "{} {} obj\n", id.0, id.1)
+        writeln!(buf, "{} {} obj", id.0, id.1)
             .map_err(|e| CoreError::InvalidStructure(format!("write error: {e}")))?;
 
         // We need to write the dictionary manually to track offsets
@@ -161,7 +160,7 @@ impl IncrementalWriter {
             }
         };
 
-        write!(buf, "<<\n")
+        writeln!(buf, "<<")
             .map_err(|e| CoreError::InvalidStructure(format!("write error: {e}")))?;
 
         let mut byte_range_offset = 0;
@@ -194,8 +193,7 @@ impl IncrementalWriter {
             } else {
                 self.serialize_object(buf, value)?;
             }
-            write!(buf, "\n")
-                .map_err(|e| CoreError::InvalidStructure(format!("write error: {e}")))?;
+            writeln!(buf).map_err(|e| CoreError::InvalidStructure(format!("write error: {e}")))?;
         }
 
         write!(buf, ">>\nendobj\n")
@@ -272,7 +270,7 @@ impl IncrementalWriter {
         buf: &mut Vec<u8>,
         entries: &[(ObjectId, usize)],
     ) -> Result<(), CoreError> {
-        write!(buf, "xref\n")
+        writeln!(buf, "xref")
             .map_err(|e| CoreError::InvalidStructure(format!("write error: {e}")))?;
 
         // Sort entries by object number for the xref table
@@ -282,9 +280,9 @@ impl IncrementalWriter {
         // Write each entry individually (simple approach: one subsection per entry)
         // A more sophisticated approach would group consecutive object numbers.
         for (id, offset) in &sorted {
-            write!(buf, "{} 1\n", id.0)
+            writeln!(buf, "{} 1", id.0)
                 .map_err(|e| CoreError::InvalidStructure(format!("write error: {e}")))?;
-            write!(buf, "{:010} {:05} n \n", offset, id.1)
+            writeln!(buf, "{:010} {:05} n ", offset, id.1)
                 .map_err(|e| CoreError::InvalidStructure(format!("write error: {e}")))?;
         }
 
@@ -305,7 +303,7 @@ impl IncrementalWriter {
         trailer.set("Root", Object::Reference(self.root_id));
         trailer.set("Prev", Object::Integer(self.prev_xref_offset as i64));
 
-        write!(buf, "trailer\n")
+        writeln!(buf, "trailer")
             .map_err(|e| CoreError::InvalidStructure(format!("write error: {e}")))?;
         self.serialize_object(buf, &Object::Dictionary(trailer))?;
         write!(buf, "\nstartxref\n{xref_offset}\n%%EOF\n")

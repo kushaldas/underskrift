@@ -8,13 +8,13 @@
 
 use std::collections::HashMap;
 
-use lopdf::{Document, Object, Stream};
 use der::Encode;
+use lopdf::{Document, Object, Stream};
 use x509_cert::Certificate;
 
-use crate::error::LtvError;
 use super::crl::CrlClient;
 use super::ocsp::OcspClient;
+use crate::error::LtvError;
 
 /// A VRI (Validation Related Information) entry for a specific signature.
 #[derive(Debug, Clone, Default)]
@@ -150,10 +150,7 @@ impl DssBuilder {
     ///
     /// Returns a tuple of (dss_dictionary, Vec<(ObjectId, stream_object)>)
     /// where the stream objects need to be added to the PDF document separately.
-    pub fn build_dss_dict(
-        &self,
-        doc: &mut Document,
-    ) -> Result<Object, LtvError> {
+    pub fn build_dss_dict(&self, doc: &mut Document) -> Result<Object, LtvError> {
         let mut dss_dict = lopdf::Dictionary::new();
 
         // /Certs array — each cert is a stream object
@@ -285,7 +282,11 @@ mod tests {
         let cert = vec![0x30, 0x03, 0x01, 0x02, 0x03];
         builder.add_certificate(cert.clone());
         builder.add_certificate(cert.clone());
-        assert_eq!(builder.certificates.len(), 1, "duplicates should be ignored");
+        assert_eq!(
+            builder.certificates.len(),
+            1,
+            "duplicates should be ignored"
+        );
     }
 
     #[test]

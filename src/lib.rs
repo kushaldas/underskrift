@@ -26,8 +26,8 @@
 //! ```
 
 // Modules — always compiled
-pub mod core;
 pub mod cms;
+pub mod core;
 pub mod crypto;
 pub mod error;
 pub mod remote;
@@ -67,17 +67,17 @@ pub mod report;
 pub mod inspect;
 
 // Public re-exports for convenience
-pub use error::PdfSignError;
-pub use signer::{PdfSigner, SigningOptions, PadesLevel, SubFilter};
 pub use cms::builder::{CmsProfile, SigningTimePlacement};
-pub use crypto::traits::CryptoSigner;
-pub use crypto::software::SoftwareSigner;
-pub use crypto::algorithm::{AlgorithmRegistry, DigestAlgorithm, SignatureAlgorithm};
 pub use core::doc_timestamp::DocTimestampOptions;
+pub use crypto::algorithm::{AlgorithmRegistry, DigestAlgorithm, SignatureAlgorithm};
+pub use crypto::software::SoftwareSigner;
+pub use crypto::traits::CryptoSigner;
+pub use error::PdfSignError;
+pub use signer::{PadesLevel, PdfSigner, SigningOptions, SubFilter};
 
 pub use remote::{
-    prepare_signature, finalize_signature,
-    PreparedSignature, RemoteSignerInfo, RemoteSigningOptions,
+    finalize_signature, prepare_signature, PreparedSignature, RemoteSignerInfo,
+    RemoteSigningOptions,
 };
 
 #[cfg(feature = "tsp")]
@@ -88,21 +88,17 @@ pub use verify::SignatureVerifier;
 
 #[cfg(feature = "visual")]
 pub use visual::{
-    AppearanceContext, AppearanceRenderer, AppearanceStream, Arrangement, Border, Color,
-    CustomAppearanceResult, FontSpec, ImageConfig, ImageFormat, ImageResource, ImageScale,
-    Measurement, SignatureLayout, SignatureRect, SignatureTemplate, Standard14Font, TextAlignment,
-    TextConfig, TextLine, VisibleSignatureConfig,
     build_appearance, build_appearance_with_context, build_default_text_appearance,
-    build_text_appearance,
-    prepare_image, EmbeddedImage,
-    prepare_embedded_font, EmbeddedFontInfo, PreparedEmbeddedFont,
-    encode_cid_text, build_tounicode_cmap, build_w_array,
-    embedded_ascent_1000, embedded_descent_1000,
+    build_text_appearance, build_tounicode_cmap, build_w_array, embedded_ascent_1000,
+    embedded_descent_1000, encode_cid_text, prepare_embedded_font, prepare_image,
+    AppearanceContext, AppearanceRenderer, AppearanceStream, Arrangement, Border, Color,
+    CustomAppearanceResult, EmbeddedFontInfo, EmbeddedImage, FontSpec, ImageConfig, ImageFormat,
+    ImageResource, ImageScale, Measurement, PreparedEmbeddedFont, SignatureLayout, SignatureRect,
+    SignatureTemplate, Standard14Font, TextAlignment, TextConfig, TextLine, VisibleSignatureConfig,
 };
 
 #[cfg(feature = "inspect")]
 pub use inspect::{
-    PdfInspection, PdfObjectInfo, ObjectKind, inspect_pdf,
-    PdfSignatureInspection, SignatureFieldInfo, DssInfo, DssVriEntry,
-    inspect_signatures, extract_cms_by_object,
+    extract_cms_by_object, inspect_pdf, inspect_signatures, DssInfo, DssVriEntry, ObjectKind,
+    PdfInspection, PdfObjectInfo, PdfSignatureInspection, SignatureFieldInfo,
 };

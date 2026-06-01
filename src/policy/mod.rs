@@ -165,7 +165,11 @@ impl PolicyResult {
 
 impl fmt::Display for PolicyResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "policy={} conclusion={}", self.policy_id, self.conclusion)?;
+        write!(
+            f,
+            "policy={} conclusion={}",
+            self.policy_id, self.conclusion
+        )?;
         if let Some(ref msg) = self.message {
             write!(f, " ({})", msg)?;
         }

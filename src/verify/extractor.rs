@@ -150,7 +150,7 @@ pub fn extract_signatures_from_doc(doc: &Document) -> Result<Vec<ExtractedSignat
         let signature_type = sig_dict
             .get(b"SubFilter")
             .and_then(Object::as_name)
-            .map(|n| SignatureType::from_sub_filter(n))
+            .map(SignatureType::from_sub_filter)
             .unwrap_or(SignatureType::Unknown("missing".to_string()));
 
         // Extract Contents (the CMS/PKCS#7 bytes)

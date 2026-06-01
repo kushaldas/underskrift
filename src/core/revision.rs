@@ -135,7 +135,7 @@ impl SafeObjectClassifier for DefaultSafeObjectClassifier {
     ) {
         // DSS, Extensions, Metadata from root
         for key in &[b"DSS".as_slice(), b"Extensions", b"Metadata"] {
-            if let Ok(obj) = root_dict.get(*key) {
+            if let Ok(obj) = root_dict.get(key) {
                 if let Ok(id) = obj.as_reference() {
                     safe_objects.push(id.0);
                 }
@@ -354,10 +354,7 @@ fn is_invisible_annotation(
     }
 
     // Step 2: Check subtype
-    let subtype_bytes = dict
-        .get(b"Subtype")
-        .ok()
-        .and_then(|s| s.as_name().ok());
+    let subtype_bytes = dict.get(b"Subtype").ok().and_then(|s| s.as_name().ok());
     let subtype = subtype_bytes
         .map(|b| std::str::from_utf8(b).unwrap_or(""))
         .unwrap_or("");
@@ -460,10 +457,7 @@ fn get_border_width(dict: &lopdf::Dictionary) -> f32 {
 fn resolve_to_dict<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a lopdf::Dictionary> {
     match obj {
         Object::Dictionary(d) => Some(d),
-        Object::Reference(id) => doc
-            .get_object(*id)
-            .ok()
-            .and_then(|o| o.as_dict().ok()),
+        Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| o.as_dict().ok()),
         _ => None,
     }
 }
@@ -792,12 +786,7 @@ impl RevisionAnalysis {
             let curr_doc = Document::load_mem(curr_bytes).ok();
 
             if let (Some(ref prev_doc), Some(ref curr_doc)) = (&prev_doc, &curr_doc) {
-                classify_revision(
-                    &mut revisions[i],
-                    prev_doc,
-                    curr_doc,
-                    classifier,
-                );
+                classify_revision(&mut revisions[i], prev_doc, curr_doc, classifier);
             } else {
                 // If we can't parse either doc, mark as unsafe
                 revisions[i].safe_update = false;
@@ -911,7 +900,7 @@ fn classify_revision(
     // Check non-root changed objects for safety
     let mut safe_objects: Vec<u32> = Vec::new();
 
-    for (obj_num, _offsets) in &rev.changed_xref {
+    for obj_num in rev.changed_xref.keys() {
         if *obj_num == rev.root_object_id {
             continue;
         }
@@ -976,16 +965,12 @@ fn classify_revision(
     }
 
     // Determine safe_update
-    let unsupported_root_change = changed_root_items
-        .iter()
-        .any(|k| k != "AcroForm");
+    let unsupported_root_change = changed_root_items.iter().any(|k| k != "AcroForm");
 
     let unsafe_ref_update = rev
         .changed_xref
         .keys()
-        .any(|obj_num| {
-            *obj_num != rev.root_object_id && !safe_objects.contains(obj_num)
-        });
+        .any(|obj_num| *obj_num != rev.root_object_id && !safe_objects.contains(obj_num));
 
     let safe_update = !unsupported_root_change && !unsafe_ref_update && legal_root_object;
 
@@ -1098,7 +1083,10 @@ fn get_acroform_fields(doc: &Document) -> Option<Vec<Object>> {
 }
 
 /// Get the signature dictionary from a field, handling both inline /V and reference.
-fn get_sig_dict<'a>(doc: &'a Document, field_dict: &'a lopdf::Dictionary) -> Option<&'a lopdf::Dictionary> {
+fn get_sig_dict<'a>(
+    doc: &'a Document,
+    field_dict: &'a lopdf::Dictionary,
+) -> Option<&'a lopdf::Dictionary> {
     // Try /V first (standard location for signature value)
     if let Ok(v) = field_dict.get(b"V") {
         match v {
@@ -1240,12 +1228,9 @@ mod tests {
 
     #[test]
     fn test_objects_match_reals() {
-        assert!(objects_match(&Object::Real(3.14), &Object::Real(3.14)));
-        assert!(objects_match(
-            &Object::Real(3.14),
-            &Object::Real(3.14005)
-        )); // within epsilon
-        assert!(!objects_match(&Object::Real(3.14), &Object::Real(3.15)));
+        assert!(objects_match(&Object::Real(2.5), &Object::Real(2.5)));
+        assert!(objects_match(&Object::Real(2.5), &Object::Real(2.50005))); // within epsilon
+        assert!(!objects_match(&Object::Real(2.5), &Object::Real(2.6)));
     }
 
     #[test]
@@ -1369,9 +1354,8 @@ mod tests {
         let pdf_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.pdf");
         let pdf_bytes = std::fs::read(pdf_path).expect("read sample.pdf");
 
-        let analysis =
-            RevisionAnalysis::analyze(&pdf_bytes, &DefaultSafeObjectClassifier)
-                .expect("analyze should succeed");
+        let analysis = RevisionAnalysis::analyze(&pdf_bytes, &DefaultSafeObjectClassifier)
+            .expect("analyze should succeed");
 
         assert!(
             analysis.revision_count() >= 1,
@@ -1381,7 +1365,10 @@ mod tests {
         // The first (and only) revision of an unsigned PDF should be safe
         let first = &analysis.revisions()[0];
         assert!(first.safe_update, "first revision should be safe");
-        assert!(!first.is_signature, "unsigned PDF should not have signature revision");
+        assert!(
+            !first.is_signature,
+            "unsigned PDF should not have signature revision"
+        );
     }
 
     #[test]
@@ -1406,9 +1393,8 @@ mod tests {
             })
             .expect("sign PDF");
 
-        let analysis =
-            RevisionAnalysis::analyze(&signed_pdf, &DefaultSafeObjectClassifier)
-                .expect("analyze should succeed");
+        let analysis = RevisionAnalysis::analyze(&signed_pdf, &DefaultSafeObjectClassifier)
+            .expect("analyze should succeed");
 
         // Should have at least 2 revisions: original + signature
         assert!(
@@ -1433,11 +1419,13 @@ mod tests {
         // Find the matching byte range from the full doc
         let full_doc = Document::load_mem(&signed_pdf).expect("load signed");
         let sig_byte_ranges = extract_signature_byte_ranges(&full_doc);
-        assert!(!sig_byte_ranges.is_empty(), "should have signature byte ranges");
+        assert!(
+            !sig_byte_ranges.is_empty(),
+            "should have signature byte ranges"
+        );
 
         // We need the actual ByteRange to test covers_whole_document
-        let sigs = crate::core::parser::extract_signatures(&full_doc)
-            .expect("extract sigs");
+        let sigs = crate::core::parser::extract_signatures(&full_doc).expect("extract sigs");
         assert_eq!(sigs.len(), 1);
         let br = sigs[0].byte_range;
         assert!(
@@ -1472,8 +1460,7 @@ mod tests {
             .expect("sign PDF");
 
         let analysis =
-            RevisionAnalysis::analyze(&signed_pdf, &DefaultSafeObjectClassifier)
-                .expect("analyze");
+            RevisionAnalysis::analyze(&signed_pdf, &DefaultSafeObjectClassifier).expect("analyze");
 
         let full_doc = Document::load_mem(&signed_pdf).expect("load signed");
         let sigs = crate::core::parser::extract_signatures(&full_doc).expect("extract sigs");
@@ -1498,8 +1485,7 @@ mod tests {
         let pdf_bytes = std::fs::read(pdf_path).expect("read sample.pdf");
 
         let analysis =
-            RevisionAnalysis::analyze(&pdf_bytes, &DefaultSafeObjectClassifier)
-                .expect("analyze");
+            RevisionAnalysis::analyze(&pdf_bytes, &DefaultSafeObjectClassifier).expect("analyze");
 
         // Bogus byte range that doesn't match any revision
         let br = [0, 100, 200, 100];
@@ -1515,8 +1501,7 @@ mod tests {
         let pdf_bytes = std::fs::read(pdf_path).expect("read sample.pdf");
 
         let analysis =
-            RevisionAnalysis::analyze(&pdf_bytes, &StrictSafeObjectClassifier)
-                .expect("analyze");
+            RevisionAnalysis::analyze(&pdf_bytes, &StrictSafeObjectClassifier).expect("analyze");
 
         // Should still parse fine
         assert!(analysis.revision_count() >= 1);
@@ -1525,14 +1510,8 @@ mod tests {
     #[test]
     fn test_objects_match_mixed_number_types() {
         // Integer vs Real comparison
-        assert!(objects_match(
-            &Object::Integer(42),
-            &Object::Real(42.0)
-        ));
-        assert!(!objects_match(
-            &Object::Integer(42),
-            &Object::Real(43.0)
-        ));
+        assert!(objects_match(&Object::Integer(42), &Object::Real(42.0)));
+        assert!(!objects_match(&Object::Integer(42), &Object::Real(43.0)));
     }
 
     #[test]

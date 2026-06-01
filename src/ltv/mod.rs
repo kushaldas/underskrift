@@ -28,24 +28,22 @@ pub use tsp_ltv::ltv::status;
 pub use tsp_ltv::ltv::x509_ext;
 
 // Re-export key types
+#[cfg(feature = "blocking")]
+pub use tsp_ltv::ltv::check_certificate_revocation_blocking;
 pub use tsp_ltv::ltv::ChainBuilder;
 pub use tsp_ltv::ltv::CrlClient;
 pub use tsp_ltv::ltv::OcspClient;
 pub use tsp_ltv::ltv::{
-    AiaAccessMethod, extract_aia_urls,
-    CertStatus, SingleResponse, ParsedBasicOcspResponse, ResponderId,
-    build_ocsp_request_with_nonce, has_ocsp_nocheck_extension,
-    parse_ocsp_response, ocsp_check_revocation,
+    build_ocsp_request_with_nonce, extract_aia_urls, has_ocsp_nocheck_extension,
+    ocsp_check_revocation, parse_ocsp_response, AiaAccessMethod, CertStatus,
+    ParsedBasicOcspResponse, ResponderId, SingleResponse,
 };
-pub use tsp_ltv::ltv::{RevocationConfig, check_certificate_revocation};
-#[cfg(feature = "blocking")]
-pub use tsp_ltv::ltv::check_certificate_revocation_blocking;
-pub use tsp_ltv::ltv::{ValidationStatus, RevocationSource, RevocationReason, resolve_priority};
 pub use tsp_ltv::ltv::{
-    KeyUsageBits, CertRole,
-    check_basic_constraints, check_key_usage, check_extended_key_usage,
-    has_extension, validate_extensions_for_role,
+    check_basic_constraints, check_extended_key_usage, check_key_usage, has_extension,
+    validate_extensions_for_role, CertRole, KeyUsageBits,
 };
+pub use tsp_ltv::ltv::{check_certificate_revocation, RevocationConfig};
+pub use tsp_ltv::ltv::{resolve_priority, RevocationReason, RevocationSource, ValidationStatus};
 
 // DSS re-exports (local)
-pub use dss::{DssBuilder, VriEntry, compute_vri_key};
+pub use dss::{compute_vri_key, DssBuilder, VriEntry};

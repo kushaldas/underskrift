@@ -49,16 +49,25 @@ async fn test_sign_then_verify_pades() {
 
     // Verify the signed PDF
     let verifier = SignatureVerifier::new(&trust_stores);
-    let report = verifier.verify_pdf(&signed_pdf).expect("verification failed");
+    let report = verifier
+        .verify_pdf(&signed_pdf)
+        .expect("verification failed");
 
-    assert_eq!(report.signatures.len(), 1, "should have exactly 1 signature");
+    assert_eq!(
+        report.signatures.len(),
+        1,
+        "should have exactly 1 signature"
+    );
     let sig = &report.signatures[0];
 
     assert_eq!(sig.field_name, "TestSig1");
     assert!(sig.integrity_ok, "ByteRange integrity should be OK");
     assert!(sig.digest_matches, "messageDigest should match");
     assert!(sig.covers_whole_document, "should cover entire file");
-    assert!(!sig.modifications_after_signing, "no modifications expected");
+    assert!(
+        !sig.modifications_after_signing,
+        "no modifications expected"
+    );
     assert!(
         sig.status == SignatureStatus::Valid || sig.status == SignatureStatus::ValidButUntrusted,
         "signature should be valid or valid-but-untrusted, got: {:?}\nsummary: {}",
@@ -98,7 +107,9 @@ async fn test_sign_then_verify_pkcs7() {
         .expect("signing failed");
 
     let verifier = SignatureVerifier::new(&trust_stores);
-    let report = verifier.verify_pdf(&signed_pdf).expect("verification failed");
+    let report = verifier
+        .verify_pdf(&signed_pdf)
+        .expect("verification failed");
 
     assert_eq!(report.signatures.len(), 1);
     let sig = &report.signatures[0];
@@ -187,7 +198,9 @@ async fn test_verify_detects_tampered_pdf() {
     }
 
     let verifier = SignatureVerifier::new(&trust_stores);
-    let report = verifier.verify_pdf(&signed_pdf).expect("should still parse");
+    let report = verifier
+        .verify_pdf(&signed_pdf)
+        .expect("should still parse");
 
     assert_eq!(report.signatures.len(), 1);
     let sig = &report.signatures[0];
@@ -224,7 +237,9 @@ async fn test_verify_with_intermediate_ca() {
         .expect("signing failed");
 
     let verifier = SignatureVerifier::new(&trust_stores);
-    let report = verifier.verify_pdf(&signed_pdf).expect("verification failed");
+    let report = verifier
+        .verify_pdf(&signed_pdf)
+        .expect("verification failed");
 
     let sig = &report.signatures[0];
     // The signer_name should be extracted from the certificate
@@ -258,7 +273,9 @@ async fn test_verify_no_timestamp_has_none_fields() {
         .expect("signing failed");
 
     let verifier = SignatureVerifier::new(&trust_stores);
-    let report = verifier.verify_pdf(&signed_pdf).expect("verification failed");
+    let report = verifier
+        .verify_pdf(&signed_pdf)
+        .expect("verification failed");
 
     let sig = &report.signatures[0];
     assert!(
@@ -293,7 +310,9 @@ async fn test_verify_traditional_no_timestamp_has_none_fields() {
         .expect("signing failed");
 
     let verifier = SignatureVerifier::new(&trust_stores);
-    let report = verifier.verify_pdf(&signed_pdf).expect("verification failed");
+    let report = verifier
+        .verify_pdf(&signed_pdf)
+        .expect("verification failed");
 
     let sig = &report.signatures[0];
     // No timestamp token → no timestamp_time
@@ -332,7 +351,9 @@ async fn test_verify_pades_ess_cert_id_match() {
         .expect("signing failed");
 
     let verifier = SignatureVerifier::new(&trust_stores);
-    let report = verifier.verify_pdf(&signed_pdf).expect("verification failed");
+    let report = verifier
+        .verify_pdf(&signed_pdf)
+        .expect("verification failed");
 
     let sig = &report.signatures[0];
     assert_eq!(
@@ -364,8 +385,8 @@ fn test_verify_doc_timestamp_routes_through_timestamp_path() {
         field_name: "DocTS1".to_string(),
         page: 0,
     };
-    let (output, byte_range) = prepare_doc_timestamp(&pdf_data, &options)
-        .expect("prepare_doc_timestamp failed");
+    let (output, byte_range) =
+        prepare_doc_timestamp(&pdf_data, &options).expect("prepare_doc_timestamp failed");
 
     // Inject a fake "timestamp token" — just enough DER to not be empty
     // (will fail CMS parse, but we want to test routing)
@@ -376,19 +397,17 @@ fn test_verify_doc_timestamp_routes_through_timestamp_path() {
         0x00, // ... truncated (deliberately invalid)
     ];
 
-    let timestamped_pdf = inject_timestamp_token(
-        output,
-        &byte_range,
-        &fake_token,
-        options.content_size,
-    )
-    .expect("inject_timestamp_token failed");
+    let timestamped_pdf =
+        inject_timestamp_token(output, &byte_range, &fake_token, options.content_size)
+            .expect("inject_timestamp_token failed");
 
     // The verifier should find the DocTimestamp signature and route it
     // through the doc timestamp path. Since the fake token is invalid,
     // the signature should be Invalid, but it should NOT crash.
     let verifier = SignatureVerifier::new(&trust_stores);
-    let report = verifier.verify_pdf(&timestamped_pdf).expect("verify_pdf failed");
+    let report = verifier
+        .verify_pdf(&timestamped_pdf)
+        .expect("verify_pdf failed");
 
     assert!(
         !report.signatures.is_empty(),
@@ -444,31 +463,26 @@ fn test_verify_doc_timestamp_without_tsa_trust_store() {
         field_name: "DocTSNoTSA".to_string(),
         page: 0,
     };
-    let (output, byte_range) = prepare_doc_timestamp(&pdf_data, &options)
-        .expect("prepare_doc_timestamp failed");
+    let (output, byte_range) =
+        prepare_doc_timestamp(&pdf_data, &options).expect("prepare_doc_timestamp failed");
 
     // Inject a minimal fake token
     let fake_token = vec![0x30, 0x03, 0x01, 0x01, 0x00];
-    let timestamped_pdf = inject_timestamp_token(
-        output,
-        &byte_range,
-        &fake_token,
-        options.content_size,
-    )
-    .expect("inject_timestamp_token failed");
+    let timestamped_pdf =
+        inject_timestamp_token(output, &byte_range, &fake_token, options.content_size)
+            .expect("inject_timestamp_token failed");
 
     let verifier = SignatureVerifier::new(&trust_stores);
-    let report = verifier.verify_pdf(&timestamped_pdf).expect("verify_pdf failed");
+    let report = verifier
+        .verify_pdf(&timestamped_pdf)
+        .expect("verify_pdf failed");
 
     let doc_ts_sig = report
         .signatures
         .iter()
         .find(|s| s.signature_type == SignatureType::DocTimestamp);
 
-    assert!(
-        doc_ts_sig.is_some(),
-        "should find a DocTimestamp signature"
-    );
+    assert!(doc_ts_sig.is_some(), "should find a DocTimestamp signature");
 
     let sig = doc_ts_sig.unwrap();
     // Without TSA trust store, the signature should be Invalid
@@ -500,12 +514,10 @@ fn test_verify_kushal_signed_pdf() {
 
     // Load sig trust store from pdfviewer trust directory
     let trust_base = format!("{}/../../../pdfviewer/trust", FIXTURES);
-    let sig_store =
-        TrustStore::from_pem_directory(format!("{}/sig", trust_base))
-            .expect("failed to load sig trust dir");
-    let tsa_store =
-        TrustStore::from_pem_directory(format!("{}/tsa", trust_base))
-            .expect("failed to load tsa trust dir");
+    let sig_store = TrustStore::from_pem_directory(format!("{}/sig", trust_base))
+        .expect("failed to load sig trust dir");
+    let tsa_store = TrustStore::from_pem_directory(format!("{}/tsa", trust_base))
+        .expect("failed to load tsa trust dir");
 
     let trust_stores = TrustStoreSet::new()
         .with_sig_store(sig_store)
@@ -596,12 +608,10 @@ fn test_verify_hello_signed_prod_pdf() {
 
     // Load just the root CA — minimal trust store
     let trust_base = format!("{}/../../../pdfviewer/trust", FIXTURES);
-    let sig_store =
-        TrustStore::from_pem_directory(format!("{}/sig", trust_base))
-            .expect("failed to load sig trust dir");
-    let tsa_store =
-        TrustStore::from_pem_directory(format!("{}/tsa", trust_base))
-            .expect("failed to load tsa trust dir");
+    let sig_store = TrustStore::from_pem_directory(format!("{}/sig", trust_base))
+        .expect("failed to load sig trust dir");
+    let tsa_store = TrustStore::from_pem_directory(format!("{}/tsa", trust_base))
+        .expect("failed to load tsa trust dir");
 
     let trust_stores = TrustStoreSet::new()
         .with_sig_store(sig_store)
@@ -618,8 +628,14 @@ fn test_verify_hello_signed_prod_pdf() {
     eprintln!("Sig0 chain_trusted: {}", sig0.chain_trusted);
     eprintln!("Sig0 cert_validity: {:?}", sig0.certificate_validity);
     eprintln!("Sig0 trust_anchor: {:?}", sig0.trust_anchor);
-    eprintln!("Sig0 covers_whole_document_revision: {:?}", sig0.covers_whole_document_revision);
-    eprintln!("Sig0 extended_by_non_safe_updates: {:?}", sig0.extended_by_non_safe_updates);
+    eprintln!(
+        "Sig0 covers_whole_document_revision: {:?}",
+        sig0.covers_whole_document_revision
+    );
+    eprintln!(
+        "Sig0 extended_by_non_safe_updates: {:?}",
+        sig0.extended_by_non_safe_updates
+    );
     eprintln!("Sig0 summary: {}", sig0.summary);
 
     let sig1 = &report.signatures[1];
@@ -650,6 +666,10 @@ fn test_verify_hello_signed_prod_pdf() {
     );
 
     // Sig1: the document timestamp should be fully valid
-    assert_eq!(sig1.status, SignatureStatus::Valid, "Sig1 doc timestamp should be Valid");
+    assert_eq!(
+        sig1.status,
+        SignatureStatus::Valid,
+        "Sig1 doc timestamp should be Valid"
+    );
     assert!(sig1.chain_trusted, "Sig1 chain should be trusted");
 }

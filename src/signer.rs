@@ -23,9 +23,10 @@ use crate::error::{CoreError, PdfSignError};
 use crate::visual::{self, AppearanceContext, SignatureLayout, VisibleSignatureConfig};
 
 /// PAdES conformance level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PadesLevel {
     /// PAdES Baseline B-B (basic signature)
+    #[default]
     BB,
     /// PAdES Baseline B-T (with timestamp)
     BT,
@@ -35,25 +36,14 @@ pub enum PadesLevel {
     BLTA,
 }
 
-impl Default for PadesLevel {
-    fn default() -> Self {
-        Self::BB
-    }
-}
-
 /// SubFilter selection for the public API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SubFilter {
     /// PAdES: ETSI.CAdES.detached
+    #[default]
     Pades,
     /// Traditional: adbe.pkcs7.detached
     Pkcs7,
-}
-
-impl Default for SubFilter {
-    fn default() -> Self {
-        Self::Pades
-    }
 }
 
 impl From<SubFilter> for SigSubFilter {
@@ -210,12 +200,11 @@ impl PdfSigner {
         if let Some(registry) = &self.options.algorithm_registry {
             registry
                 .validate(signer.signature_algorithm(), signer.digest_algorithm())
-                .map_err(|msg| PdfSignError::AlgorithmNotAllowed(msg))?;
+                .map_err(PdfSignError::AlgorithmNotAllowed)?;
         }
 
         // Step 1: Parse the PDF
-        let mut doc = Document::load_mem(pdf_data)
-            .map_err(|e| CoreError::Lopdf(e))?;
+        let mut doc = Document::load_mem(pdf_data).map_err(CoreError::Lopdf)?;
 
         // Step 2: Extract metadata needed for incremental writer
         let meta = parser::extract_metadata(&doc)?;
@@ -265,15 +254,24 @@ impl PdfSigner {
             // For Custom layouts, build an AppearanceContext from signing options
             let appearance = if matches!(&vis_config.layout, SignatureLayout::Custom(_)) {
                 let ctx = AppearanceContext {
-                    width: 0.0,  // will be overridden by build_appearance_with_context
-                    height: 0.0, // will be overridden by build_appearance_with_context
+                    width: 0.0,        // will be overridden by build_appearance_with_context
+                    height: 0.0,       // will be overridden by build_appearance_with_context
                     signer_name: None, // not easily available without parsing cert
                     reason: self.options.reason.clone(),
                     location: self.options.location.clone(),
-                    date: Some(chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+                    date: Some(
+                        chrono::Utc::now()
+                            .format("%Y-%m-%d %H:%M:%S UTC")
+                            .to_string(),
+                    ),
                     contact_info: self.options.contact_info.clone(),
                 };
-                visual::build_appearance_with_context(vis_config, page_width, page_height, Some(&ctx))?
+                visual::build_appearance_with_context(
+                    vis_config,
+                    page_width,
+                    page_height,
+                    Some(&ctx),
+                )?
             } else {
                 visual::build_appearance(vis_config, page_width, page_height)?
             };
@@ -315,16 +313,10 @@ impl PdfSigner {
                 let mut fd = Dictionary::new();
                 fd.set("Type", Object::Name(b"Font".to_vec()));
                 fd.set("Subtype", Object::Name(b"Type1".to_vec()));
-                fd.set(
-                    "BaseFont",
-                    Object::Name(pdf_font_name.as_bytes().to_vec()),
-                );
+                fd.set("BaseFont", Object::Name(pdf_font_name.as_bytes().to_vec()));
                 let font_id = doc.add_object(Object::Dictionary(fd));
                 appearance_object_ids.push(font_id);
-                font_dict.set(
-                    res_name.as_bytes(),
-                    Object::Reference(font_id),
-                );
+                font_dict.set(res_name.as_bytes(), Object::Reference(font_id));
             }
 
             // Build CIDFont/Type0 font dictionaries for embedded fonts
@@ -334,7 +326,10 @@ impl PdfSigner {
 
                 // 1. Embed the subsetted font as a FontFile2 stream
                 let mut font_file_dict = Dictionary::new();
-                font_file_dict.set("Length1", Object::Integer(prepared.subset_data.len() as i64));
+                font_file_dict.set(
+                    "Length1",
+                    Object::Integer(prepared.subset_data.len() as i64),
+                );
                 let mut font_file_stream =
                     Stream::new(font_file_dict, prepared.subset_data.clone());
                 let _ = font_file_stream.compress();
@@ -346,39 +341,23 @@ impl PdfSigner {
                 let descent_1000 = visual::font::embedded_descent_1000(info);
                 let mut font_desc = Dictionary::new();
                 font_desc.set("Type", Object::Name(b"FontDescriptor".to_vec()));
-                font_desc.set(
-                    "FontName",
-                    Object::Name(info.name.as_bytes().to_vec()),
-                );
+                font_desc.set("FontName", Object::Name(info.name.as_bytes().to_vec()));
                 font_desc.set("Flags", Object::Integer(info.flags as i64));
                 font_desc.set(
                     "FontBBox",
                     Object::Array(vec![
-                        Object::Integer(
-                            info.bbox[0] as i64 * 1000 / info.units_per_em as i64,
-                        ),
-                        Object::Integer(
-                            info.bbox[1] as i64 * 1000 / info.units_per_em as i64,
-                        ),
-                        Object::Integer(
-                            info.bbox[2] as i64 * 1000 / info.units_per_em as i64,
-                        ),
-                        Object::Integer(
-                            info.bbox[3] as i64 * 1000 / info.units_per_em as i64,
-                        ),
+                        Object::Integer(info.bbox[0] as i64 * 1000 / info.units_per_em as i64),
+                        Object::Integer(info.bbox[1] as i64 * 1000 / info.units_per_em as i64),
+                        Object::Integer(info.bbox[2] as i64 * 1000 / info.units_per_em as i64),
+                        Object::Integer(info.bbox[3] as i64 * 1000 / info.units_per_em as i64),
                     ]),
                 );
-                font_desc.set(
-                    "ItalicAngle",
-                    Object::Real(info.italic_angle),
-                );
+                font_desc.set("ItalicAngle", Object::Real(info.italic_angle));
                 font_desc.set("Ascent", Object::Integer(ascent_1000 as i64));
                 font_desc.set("Descent", Object::Integer(descent_1000 as i64));
                 font_desc.set(
                     "CapHeight",
-                    Object::Integer(
-                        info.cap_height as i64 * 1000 / info.units_per_em as i64,
-                    ),
+                    Object::Integer(info.cap_height as i64 * 1000 / info.units_per_em as i64),
                 );
                 font_desc.set("StemV", Object::Integer(info.stem_v as i64));
                 font_desc.set("FontFile2", Object::Reference(font_file_id));
@@ -405,25 +384,13 @@ impl PdfSigner {
                 let mut cid_font = Dictionary::new();
                 cid_font.set("Type", Object::Name(b"Font".to_vec()));
                 cid_font.set("Subtype", Object::Name(b"CIDFontType2".to_vec()));
-                cid_font.set(
-                    "BaseFont",
-                    Object::Name(info.name.as_bytes().to_vec()),
-                );
-                cid_font.set(
-                    "CIDSystemInfo",
-                    Object::Dictionary(cid_system_info),
-                );
+                cid_font.set("BaseFont", Object::Name(info.name.as_bytes().to_vec()));
+                cid_font.set("CIDSystemInfo", Object::Dictionary(cid_system_info));
                 cid_font.set("W", w_array);
-                cid_font.set(
-                    "DW",
-                    Object::Integer(prepared.default_width as i64),
-                );
+                cid_font.set("DW", Object::Integer(prepared.default_width as i64));
                 cid_font.set("FontDescriptor", Object::Reference(font_desc_id));
                 // CIDToGIDMap: Identity mapping (CID = GID in the subsetted font)
-                cid_font.set(
-                    "CIDToGIDMap",
-                    Object::Name(b"Identity".to_vec()),
-                );
+                cid_font.set("CIDToGIDMap", Object::Name(b"Identity".to_vec()));
                 let cid_font_id = doc.add_object(Object::Dictionary(cid_font));
                 appearance_object_ids.push(cid_font_id);
 
@@ -438,10 +405,7 @@ impl PdfSigner {
                 let mut type0 = Dictionary::new();
                 type0.set("Type", Object::Name(b"Font".to_vec()));
                 type0.set("Subtype", Object::Name(b"Type0".to_vec()));
-                type0.set(
-                    "BaseFont",
-                    Object::Name(info.name.as_bytes().to_vec()),
-                );
+                type0.set("BaseFont", Object::Name(info.name.as_bytes().to_vec()));
                 type0.set("Encoding", Object::Name(b"Identity-H".to_vec()));
                 type0.set(
                     "DescendantFonts",
@@ -510,10 +474,7 @@ impl PdfSigner {
                 // For PNG (FlateDecode), compress the raw sample data.
                 let img_stream = if img.filter == "DCTDecode" {
                     // JPEG: set filter and use raw JPEG data as-is
-                    img_dict.set(
-                        "Filter",
-                        Object::Name(b"DCTDecode".to_vec()),
-                    );
+                    img_dict.set("Filter", Object::Name(b"DCTDecode".to_vec()));
                     Stream::new(img_dict, img.data.clone())
                 } else {
                     // Raw pixel data: use lopdf's compress() to apply FlateDecode
@@ -524,10 +485,7 @@ impl PdfSigner {
 
                 let img_id = doc.add_object(Object::Stream(img_stream));
                 appearance_object_ids.push(img_id);
-                xobj_res_dict.set(
-                    img_res.resource_name.as_bytes(),
-                    Object::Reference(img_id),
-                );
+                xobj_res_dict.set(img_res.resource_name.as_bytes(), Object::Reference(img_id));
             }
 
             // Build the resource dictionary for the Form XObject
@@ -545,13 +503,7 @@ impl PdfSigner {
             xobj_dict.set("Subtype", Object::Name(b"Form".to_vec()));
             xobj_dict.set(
                 "BBox",
-                Object::Array(
-                    appearance
-                        .bbox
-                        .iter()
-                        .map(|&v| Object::Real(v))
-                        .collect(),
-                ),
+                Object::Array(appearance.bbox.iter().map(|&v| Object::Real(v)).collect()),
             );
             xobj_dict.set("Resources", Object::Dictionary(resources));
 

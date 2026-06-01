@@ -89,18 +89,13 @@ pub(crate) fn rsassa_pss_params_any(digest: DigestAlgorithm) -> Result<Any, Stri
 }
 
 /// The mode of CMS construction — affects which signed attributes are included.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CmsProfile {
     /// PAdES (ETSI.CAdES.detached): requires signingCertificateV2, omits signingTime
+    #[default]
     Pades,
     /// Traditional (adbe.pkcs7.detached): allows signingTime, no signingCertificateV2 required
     Traditional,
-}
-
-impl Default for CmsProfile {
-    fn default() -> Self {
-        Self::Pades
-    }
 }
 
 /// Controls where the `signingTime` attribute is placed in the CMS structure.
@@ -112,22 +107,17 @@ impl Default for CmsProfile {
 /// **Note**: In PAdES mode, `signingTime` is always omitted from signed attributes
 /// per ETSI EN 319 122-1. This setting only affects PAdES when set to `Unsigned`
 /// or `Both`, in which case the unsigned copy is still added.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SigningTimePlacement {
     /// Place `signingTime` only in signed attributes (default for Traditional).
     /// In PAdES mode, this means the time is omitted entirely.
+    #[default]
     Signed,
     /// Place `signingTime` only in unsigned attributes.
     Unsigned,
     /// Place `signingTime` in both signed and unsigned attributes.
     /// In PAdES mode, only the unsigned copy is included.
     Both,
-}
-
-impl Default for SigningTimePlacement {
-    fn default() -> Self {
-        Self::Signed
-    }
 }
 
 /// Intermediate state from [`PdfCmsBuilder::pre_sign`] for deferred/remote signing.
@@ -800,7 +790,7 @@ fn build_signing_time_attr(time: &chrono::NaiveDateTime) -> Result<Attribute, Cm
     )
     .map_err(|e| CmsError::Der(format!("failed to create der::DateTime: {e}")))?;
 
-    let time_der = if year >= 1950 && year <= 2049 {
+    let time_der = if (1950..=2049).contains(&year) {
         let utc_time = der::asn1::UtcTime::from_date_time(dt)
             .map_err(|e| CmsError::Der(format!("failed to create UtcTime: {e}")))?;
         utc_time
@@ -1233,7 +1223,7 @@ pub(crate) mod tests {
             .profile(CmsProfile::Traditional)
             .signing_time(time)
             // Default placement = Signed
-            .build(&vec![0xAA; 32])
+            .build(&[0xAA; 32])
             .expect("build");
 
         let (_sd, si) = parse_cms_signer_info(&cms_der);
@@ -1265,7 +1255,7 @@ pub(crate) mod tests {
             .profile(CmsProfile::Traditional)
             .signing_time(time)
             .signing_time_placement(SigningTimePlacement::Unsigned)
-            .build(&vec![0xAA; 32])
+            .build(&[0xAA; 32])
             .expect("build");
 
         let (_sd, si) = parse_cms_signer_info(&cms_der);
@@ -1301,7 +1291,7 @@ pub(crate) mod tests {
             .profile(CmsProfile::Traditional)
             .signing_time(time)
             .signing_time_placement(SigningTimePlacement::Both)
-            .build(&vec![0xAA; 32])
+            .build(&[0xAA; 32])
             .expect("build");
 
         let (_sd, si) = parse_cms_signer_info(&cms_der);
@@ -1338,7 +1328,7 @@ pub(crate) mod tests {
             .profile(CmsProfile::Pades)
             .signing_time(time)
             .signing_time_placement(SigningTimePlacement::Unsigned)
-            .build(&vec![0xAA; 32])
+            .build(&[0xAA; 32])
             .expect("build");
 
         let (_sd, si) = parse_cms_signer_info(&cms_der);
@@ -1375,7 +1365,7 @@ pub(crate) mod tests {
             .profile(CmsProfile::Pades)
             .signing_time(time)
             .signing_time_placement(SigningTimePlacement::Both)
-            .build(&vec![0xAA; 32])
+            .build(&[0xAA; 32])
             .expect("build");
 
         let (_sd, si) = parse_cms_signer_info(&cms_der);
@@ -1408,7 +1398,7 @@ pub(crate) mod tests {
             .profile(CmsProfile::Traditional)
             .signing_time_placement(SigningTimePlacement::Both)
             // Note: no signing_time() call
-            .build(&vec![0xAA; 32])
+            .build(&[0xAA; 32])
             .expect("build");
 
         let (_sd, si) = parse_cms_signer_info(&cms_der);

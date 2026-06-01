@@ -309,12 +309,8 @@ mod tests {
     fn test_hash_computation_sha256() {
         let mut pdf_data = vec![0u8; 100];
         // Fill range1 and range2 with known data
-        for i in 0..40 {
-            pdf_data[i] = 0xAA;
-        }
-        for i in 60..100 {
-            pdf_data[i] = 0xBB;
-        }
+        pdf_data[0..40].fill(0xAA);
+        pdf_data[60..100].fill(0xBB);
         let byte_range = [0, 40, 60, 40];
 
         let hash = compute_byte_range_hash(&pdf_data, &byte_range, DigestAlgorithm::Sha256);

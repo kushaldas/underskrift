@@ -323,7 +323,7 @@ pub fn build_svt_timestamp_token(
     let signed_data = SignedData {
         version: CmsVersion::V3,
         digest_algorithms,
-        encap_content_info: encap_content_info,
+        encap_content_info,
         certificates: Some(cert_set),
         crls: None,
         signer_infos: SignerInfos(signer_infos_set),
@@ -629,7 +629,7 @@ pub fn extract_svt_jwt_from_token(cms_der: &[u8]) -> Result<String, SvtError> {
         )));
     }
     // Verify it's id-signedData
-    let ct_oid = ObjectIdentifier::from_der(&der_utils::encode_tlv(0x06, &oid_body))
+    let ct_oid = ObjectIdentifier::from_der(&der_utils::encode_tlv(0x06, oid_body))
         .map_err(|e| SvtError::Embedding(format!("invalid contentType OID: {e}")))?;
     if ct_oid != ID_SIGNED_DATA {
         return Err(SvtError::Embedding(format!(
@@ -647,7 +647,7 @@ pub fn extract_svt_jwt_from_token(cms_der: &[u8]) -> Result<String, SvtError> {
     }
 
     // SignedData SEQUENCE
-    let (sd_tag, sd_body) = der_utils::parse_tlv(&sd_inner)
+    let (sd_tag, sd_body) = der_utils::parse_tlv(sd_inner)
         .map_err(|e| SvtError::Embedding(format!("failed to parse SignedData: {e}")))?;
     if sd_tag != 0x30 {
         return Err(SvtError::Embedding("SignedData: expected SEQUENCE".into()));
@@ -666,14 +666,14 @@ pub fn extract_svt_jwt_from_token(cms_der: &[u8]) -> Result<String, SvtError> {
         .map_err(|e| SvtError::Embedding(format!("failed to parse encapContentInfo: {e}")))?;
 
     // eContentType OID — should be id-ct-TSTInfo
-    let (ect_tag, ect_body, eci_rest) = der_utils::parse_tlv_with_rest(&eci_body)
+    let (ect_tag, ect_body, eci_rest) = der_utils::parse_tlv_with_rest(eci_body)
         .map_err(|e| SvtError::Embedding(format!("failed to parse eContentType: {e}")))?;
     if ect_tag != 0x06 {
         return Err(SvtError::Embedding(format!(
             "expected eContentType OID tag 0x06, got 0x{ect_tag:02x}"
         )));
     }
-    let ect_oid = ObjectIdentifier::from_der(&der_utils::encode_tlv(0x06, &ect_body))
+    let ect_oid = ObjectIdentifier::from_der(&der_utils::encode_tlv(0x06, ect_body))
         .map_err(|e| SvtError::Embedding(format!("invalid eContentType OID: {e}")))?;
     if ect_oid != ID_CT_TST_INFO {
         return Err(SvtError::Embedding(format!(
@@ -691,7 +691,7 @@ pub fn extract_svt_jwt_from_token(cms_der: &[u8]) -> Result<String, SvtError> {
     }
 
     // OCTET STRING containing TSTInfo
-    let (os_tag, tst_info_der, _) = der_utils::parse_tlv_with_rest(&ec_inner)
+    let (os_tag, tst_info_der, _) = der_utils::parse_tlv_with_rest(ec_inner)
         .map_err(|e| SvtError::Embedding(format!("failed to parse eContent OCTET STRING: {e}")))?;
     if os_tag != 0x04 {
         return Err(SvtError::Embedding(format!(
@@ -700,7 +700,7 @@ pub fn extract_svt_jwt_from_token(cms_der: &[u8]) -> Result<String, SvtError> {
     }
 
     // Parse TSTInfo SEQUENCE
-    let (tst_tag, tst_body) = der_utils::parse_tlv(&tst_info_der)
+    let (tst_tag, tst_body) = der_utils::parse_tlv(tst_info_der)
         .map_err(|e| SvtError::Embedding(format!("failed to parse TSTInfo SEQUENCE: {e}")))?;
     if tst_tag != 0x30 {
         return Err(SvtError::Embedding("TSTInfo: expected SEQUENCE".into()));
@@ -743,9 +743,9 @@ fn extract_jwt_from_extensions(extensions_body: &[u8]) -> Result<String, SvtErro
 
         if ext_tag == 0x30 {
             // Extension SEQUENCE — first element is OID
-            if let Ok((oid_tag, oid_body, ext_rest)) = der_utils::parse_tlv_with_rest(&ext_body) {
+            if let Ok((oid_tag, oid_body, ext_rest)) = der_utils::parse_tlv_with_rest(ext_body) {
                 if oid_tag == 0x06 {
-                    let this_oid_der = der_utils::encode_tlv(0x06, &oid_body);
+                    let this_oid_der = der_utils::encode_tlv(0x06, oid_body);
                     if this_oid_der == svt_oid_der {
                         // Found SVT extension — next is either BOOLEAN (critical) or OCTET STRING (extnValue)
                         return extract_jwt_value(ext_rest);
@@ -834,7 +834,7 @@ mod tests {
         // First element: OID
         let (oid_tag, oid_body, rest) = der_utils::parse_tlv_with_rest(&body).unwrap();
         assert_eq!(oid_tag, 0x06, "First element should be OID");
-        let oid = ObjectIdentifier::from_der(&der_utils::encode_tlv(0x06, &oid_body)).unwrap();
+        let oid = ObjectIdentifier::from_der(&der_utils::encode_tlv(0x06, oid_body)).unwrap();
         assert_eq!(oid, OID_SVT_EXTENSION);
 
         // Second element: OCTET STRING containing JWT

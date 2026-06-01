@@ -2376,7 +2376,7 @@ mod tests {
             .profile(crate::cms::builder::CmsProfile::Traditional)
             .signing_time(time)
             .signing_time_placement(crate::cms::builder::SigningTimePlacement::Unsigned)
-            .build(&vec![0xBB; 32])
+            .build(&[0xBB; 32])
             .expect("build");
 
         let content_info = ContentInfo::from_der(&cms_der).unwrap();
@@ -2421,7 +2421,7 @@ mod tests {
             .profile(crate::cms::builder::CmsProfile::Traditional)
             .signing_time(time)
             // default placement = Signed
-            .build(&vec![0xBB; 32])
+            .build(&[0xBB; 32])
             .expect("build");
 
         let content_info = ContentInfo::from_der(&cms_der).unwrap();

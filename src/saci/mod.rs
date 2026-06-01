@@ -127,6 +127,10 @@ pub enum MappingType {
 
 impl MappingType {
     /// Parse from the XML `Type` attribute value.
+    ///
+    /// Returns `None` (not a `Result`) for unknown values, so this is an
+    /// inherent method rather than a `FromStr` implementation.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "rdn" => Some(Self::Rdn),

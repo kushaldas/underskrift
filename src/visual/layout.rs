@@ -454,9 +454,10 @@ pub enum ImageFormat {
 
 /// How to scale the image within its allocated space.
 #[cfg(feature = "visual")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum ImageScale {
     /// Fit within the space, preserving aspect ratio.
+    #[default]
     FitPreserveAspect,
     /// Stretch to fill the entire space.
     Stretch,
@@ -465,12 +466,6 @@ pub enum ImageScale {
 }
 
 #[cfg(feature = "visual")]
-impl Default for ImageScale {
-    fn default() -> Self {
-        ImageScale::FitPreserveAspect
-    }
-}
-
 /// Text alignment within the signature rectangle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAlignment {

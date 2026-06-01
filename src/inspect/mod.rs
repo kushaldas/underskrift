@@ -4,14 +4,14 @@
 //! modifying the document. Designed to replace pikepdf-based inspection
 //! in downstream applications.
 
+pub mod cms;
 pub mod objects;
 pub mod signatures;
-pub mod cms;
 
 // Re-export public API
-pub use objects::{PdfInspection, PdfObjectInfo, ObjectKind, inspect_pdf};
-pub use signatures::{
-    PdfSignatureInspection, SignatureFieldInfo, DssInfo, VriEntry as DssVriEntry,
-    inspect_signatures,
-};
 pub use cms::extract_cms_by_object;
+pub use objects::{inspect_pdf, ObjectKind, PdfInspection, PdfObjectInfo};
+pub use signatures::{
+    inspect_signatures, DssInfo, PdfSignatureInspection, SignatureFieldInfo,
+    VriEntry as DssVriEntry,
+};

@@ -30,7 +30,10 @@ async fn test_sign_pdf_pades() {
         .expect("signing failed");
 
     // Basic sanity checks
-    assert!(signed.len() > pdf.len(), "signed PDF should be larger than original");
+    assert!(
+        signed.len() > pdf.len(),
+        "signed PDF should be larger than original"
+    );
     assert!(signed.starts_with(b"%PDF"), "should start with PDF header");
 
     // Should end with %%EOF
@@ -64,7 +67,10 @@ async fn test_sign_pdf_pades() {
     let catalog = doc.catalog().expect("should have catalog");
     assert!(catalog.has(b"AcroForm"), "catalog should have AcroForm");
 
-    println!("PAdES signing test passed. Signed PDF size: {} bytes", signed.len());
+    println!(
+        "PAdES signing test passed. Signed PDF size: {} bytes",
+        signed.len()
+    );
 }
 
 #[tokio::test]
@@ -94,7 +100,10 @@ async fn test_sign_pdf_pkcs7() {
     let catalog = doc.catalog().expect("should have catalog");
     assert!(catalog.has(b"AcroForm"));
 
-    println!("PKCS#7 signing test passed. Signed PDF size: {} bytes", signed.len());
+    println!(
+        "PKCS#7 signing test passed. Signed PDF size: {} bytes",
+        signed.len()
+    );
 }
 
 #[tokio::test]
@@ -112,20 +121,26 @@ async fn test_signed_pdf_has_valid_cms() {
     let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
 
     // Find the signature dictionary via AcroForm > Fields
-    let sigs = underskrift::core::parser::extract_signatures(&doc)
-        .expect("should extract signatures");
+    let sigs =
+        underskrift::core::parser::extract_signatures(&doc).expect("should extract signatures");
     assert_eq!(sigs.len(), 1, "should have exactly one signature");
 
     let sig = &sigs[0];
     assert_eq!(sig.field_name, "Signature1");
-    assert!(!sig.contents.is_empty(), "signature contents should not be empty");
+    assert!(
+        !sig.contents.is_empty(),
+        "signature contents should not be empty"
+    );
     assert!(!sig.sub_filter.is_empty(), "sub_filter should not be empty");
 
     // Verify the ByteRange makes sense
     let br = sig.byte_range;
     assert_eq!(br[0], 0, "ByteRange should start at 0");
     assert!(br[1] > 0, "ByteRange first length should be > 0");
-    assert!(br[2] > br[1], "ByteRange second offset should be > first length");
+    assert!(
+        br[2] > br[1],
+        "ByteRange second offset should be > first length"
+    );
     assert!(br[3] > 0, "ByteRange second length should be > 0");
     assert_eq!(
         br[0] + br[1] + (br[2] - br[1]) + br[3],
@@ -138,18 +153,27 @@ async fn test_signed_pdf_has_valid_cms() {
     use cms::signed_data::SignedData;
     use der::{Decode, Encode};
 
-    let content_info =
-        ContentInfo::from_der(&sig.contents).expect("should parse CMS ContentInfo");
+    let content_info = ContentInfo::from_der(&sig.contents).expect("should parse CMS ContentInfo");
     assert_eq!(
         content_info.content_type.to_string(),
         "1.2.840.113549.1.7.2",
         "should be id-signedData"
     );
 
-    let sd_bytes = content_info.content.to_der().expect("should encode content");
+    let sd_bytes = content_info
+        .content
+        .to_der()
+        .expect("should encode content");
     let signed_data = SignedData::from_der(&sd_bytes).expect("should parse SignedData");
-    assert_eq!(signed_data.signer_infos.0.len(), 1, "should have one signer");
-    assert!(signed_data.certificates.is_some(), "should embed certificates");
+    assert_eq!(
+        signed_data.signer_infos.0.len(),
+        1,
+        "should have one signer"
+    );
+    assert!(
+        signed_data.certificates.is_some(),
+        "should embed certificates"
+    );
 
     println!(
         "CMS validation test passed. Signature field: {}, SubFilter: {}",
@@ -183,8 +207,7 @@ async fn test_sign_writes_valid_output_file() {
 #[tokio::test]
 async fn test_sign_pdf_with_visible_signature() {
     use underskrift::{
-        VisibleSignatureConfig, SignatureRect, SignatureLayout,
-        TextConfig, TextLine, Color, Border,
+        Border, Color, SignatureLayout, SignatureRect, TextConfig, TextLine, VisibleSignatureConfig,
     };
 
     let pdf = test_pdf();
@@ -234,8 +257,8 @@ async fn test_sign_pdf_with_visible_signature() {
     assert!(catalog.has(b"AcroForm"), "catalog should have AcroForm");
 
     // Extract signature and verify it exists
-    let sigs = underskrift::core::parser::extract_signatures(&doc)
-        .expect("should extract signatures");
+    let sigs =
+        underskrift::core::parser::extract_signatures(&doc).expect("should extract signatures");
     assert_eq!(sigs.len(), 1, "should have exactly one signature");
     assert_eq!(sigs[0].field_name, "VisibleSig1");
 
@@ -247,10 +270,7 @@ async fn test_sign_pdf_with_visible_signature() {
         "should contain XObject type for appearance"
     );
     // Should contain the Form subtype
-    assert!(
-        signed_str.contains("/Form"),
-        "should contain Form subtype"
-    );
+    assert!(signed_str.contains("/Form"), "should contain Form subtype");
     // Should contain /AP (appearance dictionary)
     assert!(
         signed_str.contains("/AP"),
@@ -288,8 +308,7 @@ async fn test_sign_pdf_with_visible_signature() {
 #[tokio::test]
 async fn test_sign_pdf_with_positioned_visible_signature() {
     use underskrift::{
-        VisibleSignatureConfig, SignatureRect, SignatureLayout, Measurement,
-        TextConfig, TextLine,
+        Measurement, SignatureLayout, SignatureRect, TextConfig, TextLine, VisibleSignatureConfig,
     };
 
     let pdf = test_pdf();
@@ -304,9 +323,7 @@ async fn test_sign_pdf_with_positioned_visible_signature() {
             height: Measurement::Inches(0.75),
         },
         layout: SignatureLayout::TextOnly(TextConfig {
-            lines: vec![
-                TextLine::new("Signed with positioned rect").bold(),
-            ],
+            lines: vec![TextLine::new("Signed with positioned rect").bold()],
             ..TextConfig::default()
         }),
         background_color: None,
@@ -325,8 +342,8 @@ async fn test_sign_pdf_with_positioned_visible_signature() {
 
     // Parse and verify
     let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
-    let sigs = underskrift::core::parser::extract_signatures(&doc)
-        .expect("should extract signatures");
+    let sigs =
+        underskrift::core::parser::extract_signatures(&doc).expect("should extract signatures");
     assert_eq!(sigs.len(), 1);
     assert_eq!(sigs[0].field_name, "PositionedSig");
 
@@ -344,8 +361,8 @@ async fn test_sign_pdf_with_positioned_visible_signature() {
 #[tokio::test]
 async fn test_sign_pdf_with_image_only_signature() {
     use underskrift::{
-        VisibleSignatureConfig, SignatureRect, SignatureLayout,
-        ImageConfig, ImageFormat, ImageScale,
+        ImageConfig, ImageFormat, ImageScale, SignatureLayout, SignatureRect,
+        VisibleSignatureConfig,
     };
 
     let pdf = test_pdf();
@@ -391,16 +408,25 @@ async fn test_sign_pdf_with_image_only_signature() {
     assert!(signed.len() > pdf.len());
 
     let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
-    let sigs = underskrift::core::parser::extract_signatures(&doc)
-        .expect("should extract signatures");
+    let sigs =
+        underskrift::core::parser::extract_signatures(&doc).expect("should extract signatures");
     assert_eq!(sigs.len(), 1);
     assert_eq!(sigs[0].field_name, "ImageSig1");
 
     // Should have appearance + image xobject
     let signed_str = String::from_utf8_lossy(&signed);
-    assert!(signed_str.contains("/AP"), "should have appearance dictionary");
-    assert!(signed_str.contains("/Image"), "should have Image XObject subtype");
-    assert!(signed_str.contains("/DCTDecode"), "should have DCTDecode filter for JPEG");
+    assert!(
+        signed_str.contains("/AP"),
+        "should have appearance dictionary"
+    );
+    assert!(
+        signed_str.contains("/Image"),
+        "should have Image XObject subtype"
+    );
+    assert!(
+        signed_str.contains("/DCTDecode"),
+        "should have DCTDecode filter for JPEG"
+    );
 
     println!(
         "Image-only signature test passed. Signed PDF size: {} bytes",
@@ -411,9 +437,8 @@ async fn test_sign_pdf_with_image_only_signature() {
 #[tokio::test]
 async fn test_sign_pdf_with_image_and_text_signature() {
     use underskrift::{
-        VisibleSignatureConfig, SignatureRect, SignatureLayout,
-        ImageConfig, ImageFormat, ImageScale, TextConfig, TextLine,
-        Color, Border, Arrangement,
+        Arrangement, Border, Color, ImageConfig, ImageFormat, ImageScale, SignatureLayout,
+        SignatureRect, TextConfig, TextLine, VisibleSignatureConfig,
     };
 
     let pdf = test_pdf();
@@ -472,17 +497,26 @@ async fn test_sign_pdf_with_image_and_text_signature() {
     assert!(signed.len() > pdf.len());
 
     let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
-    let sigs = underskrift::core::parser::extract_signatures(&doc)
-        .expect("should extract signatures");
+    let sigs =
+        underskrift::core::parser::extract_signatures(&doc).expect("should extract signatures");
     assert_eq!(sigs.len(), 1);
     assert_eq!(sigs[0].field_name, "ImageTextSig1");
 
     // Should have appearance, font, and image resources
     let signed_str = String::from_utf8_lossy(&signed);
-    assert!(signed_str.contains("/AP"), "should have appearance dictionary");
+    assert!(
+        signed_str.contains("/AP"),
+        "should have appearance dictionary"
+    );
     assert!(signed_str.contains("/Image"), "should have Image XObject");
-    assert!(signed_str.contains("/Helvetica"), "should have font reference");
-    assert!(signed_str.contains("/DCTDecode"), "should have DCTDecode for JPEG");
+    assert!(
+        signed_str.contains("/Helvetica"),
+        "should have font reference"
+    );
+    assert!(
+        signed_str.contains("/DCTDecode"),
+        "should have DCTDecode for JPEG"
+    );
 
     // Verify CMS is valid
     let sig = &sigs[0];
@@ -500,8 +534,8 @@ async fn test_sign_pdf_with_image_and_text_signature() {
 #[tokio::test]
 async fn test_sign_pdf_with_png_alpha_image() {
     use underskrift::{
-        VisibleSignatureConfig, SignatureRect, SignatureLayout,
-        ImageConfig, ImageFormat, ImageScale,
+        ImageConfig, ImageFormat, ImageScale, SignatureLayout, SignatureRect,
+        VisibleSignatureConfig,
     };
 
     let pdf = test_pdf();
@@ -546,16 +580,25 @@ async fn test_sign_pdf_with_png_alpha_image() {
     assert!(signed.len() > pdf.len());
 
     let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
-    let sigs = underskrift::core::parser::extract_signatures(&doc)
-        .expect("should extract signatures");
+    let sigs =
+        underskrift::core::parser::extract_signatures(&doc).expect("should extract signatures");
     assert_eq!(sigs.len(), 1);
     assert_eq!(sigs[0].field_name, "PngAlphaSig");
 
     // Should have SMask for alpha channel
     let signed_str = String::from_utf8_lossy(&signed);
-    assert!(signed_str.contains("/SMask"), "should have SMask for alpha channel");
-    assert!(signed_str.contains("/DeviceGray"), "SMask should use DeviceGray");
-    assert!(signed_str.contains("/FlateDecode"), "PNG should use FlateDecode");
+    assert!(
+        signed_str.contains("/SMask"),
+        "should have SMask for alpha channel"
+    );
+    assert!(
+        signed_str.contains("/DeviceGray"),
+        "SMask should use DeviceGray"
+    );
+    assert!(
+        signed_str.contains("/FlateDecode"),
+        "PNG should use FlateDecode"
+    );
 
     println!(
         "PNG alpha signature test passed. Signed PDF size: {} bytes",
@@ -566,8 +609,8 @@ async fn test_sign_pdf_with_png_alpha_image() {
 #[tokio::test]
 async fn test_sign_pdf_with_embedded_font_text_only() {
     use underskrift::{
-        VisibleSignatureConfig, SignatureRect, SignatureLayout,
-        TextConfig, TextLine, FontSpec, Color, Border,
+        Border, Color, FontSpec, SignatureLayout, SignatureRect, TextConfig, TextLine,
+        VisibleSignatureConfig,
     };
 
     let pdf = test_pdf();
@@ -617,20 +660,38 @@ async fn test_sign_pdf_with_embedded_font_text_only() {
     assert!(signed.len() > pdf.len());
 
     let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
-    let sigs = underskrift::core::parser::extract_signatures(&doc)
-        .expect("should extract signatures");
+    let sigs =
+        underskrift::core::parser::extract_signatures(&doc).expect("should extract signatures");
     assert_eq!(sigs.len(), 1);
     assert_eq!(sigs[0].field_name, "EmbeddedFontSig1");
 
     // Verify the signed PDF contains CIDFont/Type0 font structures
     let signed_str = String::from_utf8_lossy(&signed);
-    assert!(signed_str.contains("/AP"), "should have appearance dictionary");
+    assert!(
+        signed_str.contains("/AP"),
+        "should have appearance dictionary"
+    );
     assert!(signed_str.contains("/Type0"), "should have Type0 font");
-    assert!(signed_str.contains("/CIDFontType2"), "should have CIDFontType2");
-    assert!(signed_str.contains("/Identity-H"), "should have Identity-H encoding");
-    assert!(signed_str.contains("/FontFile2"), "should have embedded font file");
-    assert!(signed_str.contains("/ToUnicode"), "should have ToUnicode CMap");
-    assert!(signed_str.contains("DejaVuSans"), "should contain font name");
+    assert!(
+        signed_str.contains("/CIDFontType2"),
+        "should have CIDFontType2"
+    );
+    assert!(
+        signed_str.contains("/Identity-H"),
+        "should have Identity-H encoding"
+    );
+    assert!(
+        signed_str.contains("/FontFile2"),
+        "should have embedded font file"
+    );
+    assert!(
+        signed_str.contains("/ToUnicode"),
+        "should have ToUnicode CMap"
+    );
+    assert!(
+        signed_str.contains("DejaVuSans"),
+        "should contain font name"
+    );
 
     println!(
         "Embedded font text-only signature test passed. Signed PDF size: {} bytes",
@@ -641,9 +702,8 @@ async fn test_sign_pdf_with_embedded_font_text_only() {
 #[tokio::test]
 async fn test_sign_pdf_with_embedded_font_image_and_text() {
     use underskrift::{
-        VisibleSignatureConfig, SignatureRect, SignatureLayout,
-        ImageConfig, ImageFormat, ImageScale, TextConfig, TextLine,
-        FontSpec, Color, Border, Arrangement,
+        Arrangement, Border, Color, FontSpec, ImageConfig, ImageFormat, ImageScale,
+        SignatureLayout, SignatureRect, TextConfig, TextLine, VisibleSignatureConfig,
     };
 
     let pdf = test_pdf();
@@ -708,8 +768,8 @@ async fn test_sign_pdf_with_embedded_font_image_and_text() {
     assert!(signed.len() > pdf.len());
 
     let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
-    let sigs = underskrift::core::parser::extract_signatures(&doc)
-        .expect("should extract signatures");
+    let sigs =
+        underskrift::core::parser::extract_signatures(&doc).expect("should extract signatures");
     assert_eq!(sigs.len(), 1);
     assert_eq!(sigs[0].field_name, "EmbFontImgSig1");
 
@@ -717,8 +777,14 @@ async fn test_sign_pdf_with_embedded_font_image_and_text() {
     let signed_str = String::from_utf8_lossy(&signed);
     assert!(signed_str.contains("/Image"), "should have Image XObject");
     assert!(signed_str.contains("/Type0"), "should have Type0 font");
-    assert!(signed_str.contains("/CIDFontType2"), "should have CIDFontType2");
-    assert!(signed_str.contains("/FontFile2"), "should have embedded font file");
+    assert!(
+        signed_str.contains("/CIDFontType2"),
+        "should have CIDFontType2"
+    );
+    assert!(
+        signed_str.contains("/FontFile2"),
+        "should have embedded font file"
+    );
 
     println!(
         "Embedded font image+text signature test passed. Signed PDF size: {} bytes",
@@ -734,10 +800,10 @@ async fn test_sign_pdf_with_embedded_font_image_and_text() {
 #[tokio::test]
 async fn test_sign_pdf_with_custom_template() {
     use std::sync::Arc;
+    use underskrift::visual::layout::{Border, Color};
     use underskrift::visual::layout::{
         SignatureLayout, SignatureRect, SignatureTemplate, VisibleSignatureConfig,
     };
-    use underskrift::visual::layout::{Border, Color};
 
     let pdf = test_pdf();
     let signer = test_signer();
@@ -773,8 +839,8 @@ async fn test_sign_pdf_with_custom_template() {
     assert!(signed.len() > pdf.len());
 
     let doc = lopdf::Document::load_mem(&signed).expect("signed PDF should be parseable");
-    let sigs = underskrift::core::parser::extract_signatures(&doc)
-        .expect("should extract signatures");
+    let sigs =
+        underskrift::core::parser::extract_signatures(&doc).expect("should extract signatures");
     assert_eq!(sigs.len(), 1);
     assert_eq!(sigs[0].field_name, "TemplateSig1");
 

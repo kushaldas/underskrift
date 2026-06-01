@@ -535,10 +535,10 @@ impl EtsiReportGenerator {
         // Determine the process URI from options or from the policy result
         let process_uri = if let Some(ref uri) = self.options.validation_process {
             Some(uri.as_str())
-        } else if let Some(ref policy_result) = sig.policy_result {
-            Some(policy_result.policy_id.as_str())
         } else {
-            None
+            sig.policy_result
+                .as_ref()
+                .map(|policy_result| policy_result.policy_id.as_str())
         };
 
         if let Some(uri) = process_uri {

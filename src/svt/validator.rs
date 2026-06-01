@@ -288,7 +288,7 @@ impl SvtValidator {
                             .map_err(|e| SvtError::JwtVerification(format!("x5c decode: {e}")))?;
                         // Verify the cert is trusted
                         if !trusted_certs_der.is_empty() {
-                            let is_trusted = trusted_certs_der.iter().any(|tc| *tc == cert_der);
+                            let is_trusted = trusted_certs_der.contains(&cert_der);
                             if !is_trusted {
                                 // For now, accept it — in production you'd
                                 // validate the chain against trusted_certs_der

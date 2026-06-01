@@ -213,9 +213,7 @@ pub fn char_to_glyph_id(data: &[u8], ch: char) -> Result<Option<u16>, VisualErro
 pub fn glyph_advance_width(data: &[u8], glyph_id: u16) -> Result<Option<u16>, VisualError> {
     let face = ttf_parser::Face::parse(data, 0)
         .map_err(|e| VisualError::FontParsing(format!("failed to parse font: {}", e)))?;
-    Ok(face
-        .glyph_hor_advance(ttf_parser::GlyphId(glyph_id))
-        .map(|w| w))
+    Ok(face.glyph_hor_advance(ttf_parser::GlyphId(glyph_id)))
 }
 
 /// Compute the width of a string in an embedded font at the given size (in points).

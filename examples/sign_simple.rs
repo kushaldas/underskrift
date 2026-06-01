@@ -13,7 +13,10 @@ use underskrift::{CryptoSigner, PdfSigner, SigningOptions, SoftwareSigner, SubFi
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("Usage: {} <input.pdf> <key.p12> <password> [output.pdf]", args[0]);
+        eprintln!(
+            "Usage: {} <input.pdf> <key.p12> <password> [output.pdf]",
+            args[0]
+        );
         eprintln!();
         eprintln!("Options are hard-coded for simplicity. Edit the source to change:");
         eprintln!("  - SubFilter (PAdES or PKCS#7)");
@@ -43,7 +46,9 @@ fn main() {
     eprintln!("Loading PKCS#12 key: {}", p12_path);
     let signer = SoftwareSigner::from_pkcs12_file(p12_path, password).unwrap_or_else(|e| {
         eprintln!("Failed to load PKCS#12 file: {e}");
-        eprintln!("  Note: The .p12 file must use legacy encryption (openssl pkcs12 -export -legacy ...)");
+        eprintln!(
+            "  Note: The .p12 file must use legacy encryption (openssl pkcs12 -export -legacy ...)"
+        );
         std::process::exit(1);
     });
     eprintln!("  Key algorithm: {:?}", signer.signature_algorithm());
@@ -65,15 +70,17 @@ fn main() {
         .build()
         .expect("failed to create tokio runtime");
 
-    let signed = rt.block_on(async {
-        PdfSigner::new()
-            .options(options)
-            .sign(&pdf_data, &signer)
-            .await
-    }).unwrap_or_else(|e| {
-        eprintln!("Signing failed: {e}");
-        std::process::exit(1);
-    });
+    let signed = rt
+        .block_on(async {
+            PdfSigner::new()
+                .options(options)
+                .sign(&pdf_data, &signer)
+                .await
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("Signing failed: {e}");
+            std::process::exit(1);
+        });
 
     // Write output
     std::fs::write(&output_path, &signed).unwrap_or_else(|e| {
@@ -82,14 +89,21 @@ fn main() {
     });
 
     eprintln!("Signed PDF written to: {}", output_path);
-    eprintln!("  Output size: {} bytes (original: {} bytes, delta: +{} bytes)",
-        signed.len(), pdf_data.len(), signed.len() - pdf_data.len());
+    eprintln!(
+        "  Output size: {} bytes (original: {} bytes, delta: +{} bytes)",
+        signed.len(),
+        pdf_data.len(),
+        signed.len() - pdf_data.len()
+    );
 
     // Quick verification: parse with lopdf to confirm structural validity
     match lopdf::Document::load_mem(&signed) {
         Ok(doc) => {
             let pages = doc.get_pages();
-            eprintln!("  Verification: lopdf can parse the output ({} pages)", pages.len());
+            eprintln!(
+                "  Verification: lopdf can parse the output ({} pages)",
+                pages.len()
+            );
         }
         Err(e) => {
             eprintln!("  WARNING: lopdf failed to parse the output: {e}");

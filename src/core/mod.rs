@@ -5,11 +5,11 @@
 //! incremental writer for exact ByteRange control.
 
 pub mod acroform;
-pub mod sig_dict;
-pub mod sig_field;
 pub mod byte_range;
-pub mod incremental;
 pub mod doc_mdp;
 pub mod doc_timestamp;
+pub mod incremental;
 pub mod parser;
 pub mod revision;
+pub mod sig_dict;
+pub mod sig_field;

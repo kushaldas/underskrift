@@ -687,7 +687,7 @@ pub fn build_default_text_appearance(
     let line_count = lines.len() as f32;
     // Target: lines fit with 1.2x line spacing
     let max_font_size = usable_height / (line_count * 1.2);
-    let font_size = max_font_size.min(10.0).max(5.0); // clamp between 5 and 10
+    let font_size = max_font_size.clamp(5.0, 10.0); // clamp between 5 and 10
 
     let config = TextConfig {
         lines,

@@ -291,8 +291,7 @@ pub async fn validate_certificate_path(
         // Time validity: check against validation time
         let time_valid = if let Some(ref vt) = check_time {
             let validity = &cert.tbs_certificate.validity;
-            *vt >= validity.not_before.to_date_time()
-                && *vt <= validity.not_after.to_date_time()
+            *vt >= validity.not_before.to_date_time() && *vt <= validity.not_after.to_date_time()
         } else {
             true // No time to check against
         };
@@ -307,7 +306,9 @@ pub async fn validate_certificate_path(
         let extensions_valid = match validate_extensions_for_role(cert, role) {
             Ok(()) => true,
             Err(e) => {
-                issues.push(format!("cert[{i}] ({subject}): extension validation failed: {e}"));
+                issues.push(format!(
+                    "cert[{i}] ({subject}): extension validation failed: {e}"
+                ));
                 false
             }
         };
@@ -403,10 +404,7 @@ fn compute_path_status(
         }
         if !entry.extensions_valid {
             return ValidationStatus::Invalid {
-                reason: format!(
-                    "certificate {} failed extension validation",
-                    entry.subject
-                ),
+                reason: format!("certificate {} failed extension validation", entry.subject),
             };
         }
     }
@@ -428,10 +426,7 @@ fn compute_path_status(
         for entry in entries {
             if entry.revocation_status.is_unknown() {
                 return ValidationStatus::Unknown {
-                    reason: format!(
-                        "revocation status unknown for {}",
-                        entry.subject
-                    ),
+                    reason: format!("revocation status unknown for {}", entry.subject),
                 };
             }
         }
@@ -644,8 +639,16 @@ mod tests {
 
             // Each cert should have chain_valid=true, time_valid=true
             for entry in &result.per_cert_status {
-                assert!(entry.chain_valid, "chain should be valid for {}", entry.subject);
-                assert!(entry.time_valid, "time should be valid for {}", entry.subject);
+                assert!(
+                    entry.chain_valid,
+                    "chain should be valid for {}",
+                    entry.subject
+                );
+                assert!(
+                    entry.time_valid,
+                    "time should be valid for {}",
+                    entry.subject
+                );
                 assert!(
                     entry.revocation_status.is_invalid(),
                     "revocation should be Invalid (fail-closed) for {} (no endpoints)",
@@ -677,10 +680,7 @@ mod tests {
             )
             .await;
 
-            assert!(
-                result.trust_anchor.is_some(),
-                "should find trust anchor"
-            );
+            assert!(result.trust_anchor.is_some(), "should find trust anchor");
             assert!(
                 result.overall_status.is_valid(),
                 "overall should be Valid when revocation checking is not \
@@ -813,13 +813,11 @@ mod tests {
             // Chain should be [signer, intermediate]
             assert_eq!(result.chain.len(), 2, "chain should have 2 certs");
             assert_eq!(
-                result.chain[0].tbs_certificate.subject,
-                signer.tbs_certificate.subject,
+                result.chain[0].tbs_certificate.subject, signer.tbs_certificate.subject,
                 "first cert should be the signer"
             );
             assert_eq!(
-                result.chain[1].tbs_certificate.subject,
-                intermediate.tbs_certificate.subject,
+                result.chain[1].tbs_certificate.subject, intermediate.tbs_certificate.subject,
                 "second cert should be the intermediate"
             );
         }

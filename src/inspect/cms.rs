@@ -31,7 +31,7 @@ pub fn extract_cms_by_object(pdf_data: &[u8], obj_num: u32) -> Result<Vec<u8>, I
                 .iter()
                 .find(|(&(n, _), _)| n == obj_num)
                 .map(|(_, obj)| obj)
-                .ok_or_else(|| lopdf::Error::ObjectNotFound)
+                .ok_or(lopdf::Error::ObjectNotFound)
         })
         .map_err(|_| InspectError::ObjectNotFound(obj_num))?;
 
