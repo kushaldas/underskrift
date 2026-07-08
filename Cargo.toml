@@ -37,7 +37,7 @@ inspect  = ["dep:serde_json"]                              # PDF object inspecti
 tsp-ltv = "0.2"
 
 # PDF parsing and manipulation
-lopdf = "0.39"
+lopdf = "0.43"
 
 # CMS / PKCS#7 / X.509 (RustCrypto ecosystem)
 cms = { version = "0.2", features = ["alloc"] }
