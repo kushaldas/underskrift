@@ -54,11 +54,14 @@ fn main() {
     eprintln!("  Key algorithm: {:?}", signer.signature_algorithm());
 
     // Configure signing options
+    // PAdES forbids the CMS signingTime attribute, so this date is written to
+    // /M in the signature dictionary. Without it readers report the epoch.
     let options = SigningOptions {
         sub_filter: SubFilter::Pades,
         field_name: "Signature1".to_string(),
         reason: Some("Document signed with underskrift".to_string()),
         location: Some("CLI".to_string()),
+        cms_signing_time: Some(chrono::Utc::now().naive_utc()),
         ..Default::default()
     };
     eprintln!("  SubFilter: {:?}", options.sub_filter);
