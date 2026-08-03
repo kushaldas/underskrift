@@ -166,6 +166,129 @@ certs=$(grep -c "BEGIN CERTIFICATE" "$work/embedded.pem")
     || die "expected the intermediate to be embedded, found $certs certificate(s)"
 ok "$certs certificates embedded — signer + intermediate"
 
+# --- enveloping CAdES: openssl must accept it and get the file back ----------
+
+# The PDF path above proves the detached signature. This proves the attached
+# one: openssl is told nothing about the format, and has to both validate the
+# signature and reconstruct the original bytes from the envelope alone.
+#
+# tests/cms-tool.py appears throughout this section, and does no crypto: it only
+# locates bytes in the DER so openssl can be the one doing the arithmetic.
+cms_tool="$repo_root/tests/cms-tool.py"
+
+envelope() {
+    local mode="$1" out="$work/$1.p7m"
+    cargo run --quiet --example sign_envelope -- \
+        "$source_pdf" "$fixtures/signer.p12" test123 "$out" "$mode" \
+        > "$work/$1.txt" 2>&1 || die "$mode enveloping signature failed" "$work/$1.txt"
+}
+
+verify_envelope() {
+    openssl cms -verify -inform DER -in "$1" -CAfile "$fixtures/ca_cert.pem" \
+        -out "${2:-/dev/null}" > "$work/cms-verify.txt" 2>&1
+}
+
+section "enveloping CAdES"
+envelope single
+ok "signed — $(stat -c%s "$source_pdf") → $(stat -c%s "$work/single.p7m") bytes"
+
+verify_envelope "$work/single.p7m" "$work/recovered.pdf" \
+    || die "openssl rejected the envelope" "$work/cms-verify.txt"
+ok "openssl validates the signature and the chain"
+
+cmp -s "$source_pdf" "$work/recovered.pdf" \
+    || die "openssl recovered content that differs from the input"
+ok "openssl recovered the original file byte for byte"
+
+# The envelope is worthless if what comes out is no longer a usable document.
+qpdf --check "$work/recovered.pdf" > "$work/recovered-qpdf.txt" 2>&1 \
+    || die "the recovered PDF no longer parses" "$work/recovered-qpdf.txt"
+ok "the recovered PDF still passes qpdf --check"
+
+# A flipped byte inside the envelope must break it: otherwise the messageDigest
+# attribute is not actually binding the content.
+python3 - "$work/single.p7m" "$work/single-tampered.p7m" <<'PY'
+import sys
+data = bytearray(open(sys.argv[1], "rb").read())
+data[len(data) // 2] ^= 0xFF
+open(sys.argv[2], "wb").write(data)
+PY
+verify_envelope "$work/single-tampered.p7m" && die "a tampered envelope still validated"
+ok "a flipped byte in the envelope is rejected"
+
+# --- parallel signatures ------------------------------------------------------
+
+# Two peers over the same content. openssl checks every SignerInfo, so breaking
+# either one has to fail: that is what makes the passing case worth anything.
+section "parallel signatures"
+envelope parallel
+signers=$(python3 "$cms_tool" count "$work/parallel.p7m")
+[ "$signers" = "2" ] || die "expected 2 SignerInfos, found $signers"
+ok "$signers signers in one SignedData"
+
+verify_envelope "$work/parallel.p7m" "$work/recovered-parallel.bin" \
+    || die "openssl rejected the two-signature envelope" "$work/cms-verify.txt"
+cmp -s "$source_pdf" "$work/recovered-parallel.bin" \
+    || die "content differs after a second signature was added"
+ok "openssl validates both signatures, content unchanged"
+
+for i in 0 1; do
+    python3 "$cms_tool" break-signer "$work/parallel.p7m" "$work/broken-$i.p7m" "$i"
+    verify_envelope "$work/broken-$i.p7m" \
+        && die "openssl accepted an envelope whose signer $i is broken"
+done
+ok "breaking either signature is detected — neither is decorative"
+
+# --- countersignature ---------------------------------------------------------
+
+# RFC 5652 §11.4: the countersigner signs the target's signature value. openssl
+# computes that digest here; nothing of ours is in the loop.
+section "countersignature"
+envelope countersigned
+verify_envelope "$work/countersigned.p7m" \
+    || die "openssl rejected the countersigned envelope" "$work/cms-verify.txt"
+ok "the covered signature still validates under openssl"
+
+openssl cms -cmsout -print -inform DER -in "$work/countersigned.p7m" > "$work/cmsout.txt" 2>&1
+grep -q "countersignature (1.2.840.113549.1.9.6)" "$work/cmsout.txt" \
+    || die "openssl does not see a countersignature attribute" "$work/cmsout.txt"
+ok "openssl parses the attribute as a countersignature"
+
+python3 "$cms_tool" signature "$work/countersigned.p7m" 0 "$work/target-sig.bin"
+expected=$(openssl dgst -sha512 -r "$work/target-sig.bin" | awk '{print $1}')
+actual=$(python3 "$cms_tool" countersig-digest "$work/countersigned.p7m" 0)
+[ "$expected" = "$actual" ] \
+    || die "countersignature messageDigest is not SHA-512 of the signature it covers
+  openssl: $expected
+  found:   $actual"
+ok "messageDigest equals openssl's digest of the covered signature value"
+
+# --- composing onto a foreign envelope ---------------------------------------
+
+# The production case, with openssl standing in for whatever signed the file
+# before it reached us: openssl signs, we add to it, openssl has to still be
+# happy. Anything that re-encodes the bytes openssl signed fails right here.
+section "foreign envelope (signed by openssl)"
+foreign="$fixtures/foreign_envelope.p7m"
+verify_envelope "$foreign" "$work/foreign-content.bin" \
+    || die "openssl cannot verify its own envelope" "$work/cms-verify.txt"
+cmp -s "$fixtures/sample.pdf" "$work/foreign-content.bin" \
+    || die "the openssl fixture does not contain the sample document"
+ok "openssl signed it; the content is the sample document"
+
+for mode in parallel countersign; do
+    cargo run --quiet --example compose_envelope -- \
+        "$foreign" "$fixtures/signer.p12" test123 "$work/foreign-$mode.p7m" "$mode" \
+        > "$work/compose-$mode.txt" 2>&1 || die "$mode composition failed" "$work/compose-$mode.txt"
+
+    verify_envelope "$work/foreign-$mode.p7m" "$work/foreign-$mode.bin" \
+        || die "openssl rejected its own signature after we added a $mode signature" \
+               "$work/cms-verify.txt"
+    cmp -s "$fixtures/sample.pdf" "$work/foreign-$mode.bin" \
+        || die "$mode composition altered the enveloped content"
+    ok "we added a $mode signature — openssl still validates the original"
+done
+
 # --- tampering must be detected ----------------------------------------------
 
 # Without this, every check above would still pass on a signature that covers
