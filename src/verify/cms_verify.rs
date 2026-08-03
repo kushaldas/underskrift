@@ -114,44 +114,76 @@ pub struct CmsVerifyResult {
 /// `cms_bytes` is the raw DER from the PDF /Contents field.
 /// `data_hash` is the hash of the byte-range-selected PDF data.
 pub fn verify_cms(cms_bytes: &[u8], data_hash: &[u8]) -> Result<CmsVerifyResult, VerifyError> {
-    let mut issues = Vec::new();
+    verify_cms_signer(cms_bytes, data_hash, 0)
+}
 
-    // Step 1: Parse ContentInfo
+/// Verify every `SignerInfo` in a CMS `SignedData`, in encoded order.
+///
+/// Parallel signatures are peers: each is verified independently against
+/// `data_hash`, so one broken signature does not invalidate the others. Results
+/// come back in the same order the signers appear in the encoding — the order
+/// [`cades::add_signer`](crate::cades::add_signer) and
+/// [`cades::countersign`](crate::cades::countersign) index into.
+///
+/// Signers using a digest algorithm other than the one that produced
+/// `data_hash` will report `digest_matches: false`; use
+/// [`verify_enveloped`] for content that is carried inside the CMS, which
+/// hashes per signer.
+pub fn verify_cms_all(
+    cms_bytes: &[u8],
+    data_hash: &[u8],
+) -> Result<Vec<CmsVerifyResult>, VerifyError> {
+    let signed_data = parse_signed_data(cms_bytes)?;
+    (0..signed_data.signer_infos.0.len())
+        .map(|index| verify_cms_signer(cms_bytes, data_hash, index))
+        .collect()
+}
+
+/// Parse the `SignedData` out of a DER `ContentInfo`.
+fn parse_signed_data(cms_bytes: &[u8]) -> Result<SignedData, VerifyError> {
     let content_info = ContentInfo::from_der(cms_bytes).map_err(|e| {
         VerifyError::CmsVerification(format!("failed to parse CMS ContentInfo: {e}"))
     })?;
-
     if content_info.content_type != rfc5911::ID_SIGNED_DATA {
         return Err(VerifyError::CmsVerification(format!(
             "unexpected content type: {} (expected signedData)",
             content_info.content_type
         )));
     }
-
-    // Step 2: Parse SignedData
     let sd_bytes = content_info.content.to_der().map_err(|e| {
         VerifyError::CmsVerification(format!("failed to re-encode SignedData content: {e}"))
     })?;
-    let signed_data = SignedData::from_der(&sd_bytes)
-        .map_err(|e| VerifyError::CmsVerification(format!("failed to parse SignedData: {e}")))?;
+    SignedData::from_der(&sd_bytes)
+        .map_err(|e| VerifyError::CmsVerification(format!("failed to parse SignedData: {e}")))
+}
+
+/// Verify the `SignerInfo` at `signer_index` (in encoded order) against `data_hash`.
+fn verify_cms_signer(
+    cms_bytes: &[u8],
+    data_hash: &[u8],
+    signer_index: usize,
+) -> Result<CmsVerifyResult, VerifyError> {
+    let mut issues = Vec::new();
+
+    // Steps 1-2: Parse ContentInfo and the SignedData it wraps
+    let signed_data = parse_signed_data(cms_bytes)?;
 
     // Step 3: Extract all embedded certificates
     let embedded_certificates = extract_certificates(&signed_data);
 
-    // Step 4: Get the first (and typically only) SignerInfo
+    // Step 4: Select the requested SignerInfo
     let signer_infos: Vec<&SignerInfo> = signed_data.signer_infos.0.iter().collect();
     if signer_infos.is_empty() {
         return Err(VerifyError::CmsVerification(
             "no signer infos in SignedData".to_string(),
         ));
     }
-    if signer_infos.len() > 1 {
-        issues.push(format!(
-            "multiple signer infos found ({}); using first",
+    let signer_info = *signer_infos.get(signer_index).ok_or_else(|| {
+        VerifyError::CmsVerification(format!(
+            "no SignerInfo at index {signer_index}: the CMS has {}",
             signer_infos.len()
-        ));
-    }
-    let signer_info = signer_infos[0];
+        ))
+    })?;
 
     // Step 5: Determine digest algorithm from SignerInfo
     let digest_algorithm = oid_to_digest_algorithm(&signer_info.digest_alg.oid);
@@ -205,7 +237,7 @@ pub fn verify_cms(cms_bytes: &[u8], data_hash: &[u8]) -> Result<CmsVerifyResult,
 
     // Step 9: Verify the cryptographic signature
     let signature_valid = if let Some(ref cert) = signer_certificate {
-        match verify_signer_info_signature(signer_info, cert, cms_bytes) {
+        match verify_signer_info_signature(signer_info, cert, cms_bytes, signer_index) {
             Ok(()) => true,
             Err(e) => {
                 issues.push(format!("signature verification failed: {e}"));
@@ -629,7 +661,7 @@ pub fn verify_timestamp_token(
 
     // Step 5: Verify TSA CMS signature
     let tsa_signature_valid = if let Some(ref cert) = tsa_signer_cert {
-        match verify_signer_info_signature(tsa_signer_info, cert, token_der) {
+        match verify_signer_info_signature(tsa_signer_info, cert, token_der, 0) {
             Ok(()) => true,
             Err(e) => {
                 issues.push(format!("TSA signature verification failed: {e}"));
@@ -809,7 +841,7 @@ pub fn verify_doc_timestamp(
     // the hash of the encapsulated TSTInfo DER, NOT the byte-range hash.
     // The CMS signature verification checks this internally.
     let tsa_signature_valid = if let Some(ref cert) = tsa_signer_cert {
-        match verify_signer_info_signature(tsa_signer_info, cert, token_der) {
+        match verify_signer_info_signature(tsa_signer_info, cert, token_der, 0) {
             Ok(()) => true,
             Err(e) => {
                 issues.push(format!(
@@ -1117,12 +1149,13 @@ fn verify_signer_info_signature(
     signer_info: &SignerInfo,
     signer_cert: &Certificate,
     raw_cms_bytes: &[u8],
+    signer_index: usize,
 ) -> Result<(), VerifyError> {
     // Try to extract the raw signed attributes bytes from the original DER.
     // This preserves the original attribute ordering, which is critical because
     // SetOfVec::to_der() may re-sort elements in DER canonical order, but the
     // signer signed the attributes in their original order.
-    let attrs_bytes = extract_raw_signed_attrs(raw_cms_bytes).unwrap_or_else(|| {
+    let attrs_bytes = extract_raw_signed_attrs(raw_cms_bytes, signer_index).unwrap_or_else(|| {
         // Fallback: re-encode from parsed structure (may fail for some signers)
         let signed_attrs = signer_info.signed_attrs.as_ref().unwrap();
         let attrs_der = signed_attrs.to_der().unwrap_or_default();
@@ -1173,7 +1206,7 @@ fn verify_signer_info_signature(
 ///
 /// We navigate the ASN.1 structure:
 ///   ContentInfo → SignedData → SignerInfos → SignerInfo → signedAttrs [0]
-fn extract_raw_signed_attrs(cms_bytes: &[u8]) -> Option<Vec<u8>> {
+fn extract_raw_signed_attrs(cms_bytes: &[u8], signer_index: usize) -> Option<Vec<u8>> {
     // We need to navigate the DER manually to find the signed attrs.
     // Structure:
     //   ContentInfo ::= SEQUENCE { contentType OID, content [0] EXPLICIT ANY }
@@ -1221,9 +1254,14 @@ fn extract_raw_signed_attrs(cms_bytes: &[u8]) -> Option<Vec<u8>> {
             // Found signerInfos SET OF
             let (_, signer_infos_body) = field_reader.read_tlv(pos)?;
             // signer_infos_body contains the value of SET OF, which is one or more SignerInfo SEQUENCEs
-            // Parse first SignerInfo SEQUENCE
+            // Skip to the requested SignerInfo SEQUENCE
             let si_reader = DerReader::new(signer_infos_body);
-            let (_, si_body) = si_reader.read_sequence(0)?;
+            let mut si_offset = 0;
+            for _ in 0..signer_index {
+                let (next, _) = si_reader.read_tlv(si_offset)?;
+                si_offset = next;
+            }
+            let (_, si_body) = si_reader.read_sequence(si_offset)?;
 
             // Navigate SignerInfo fields:
             let si_field_reader = DerReader::new(si_body);

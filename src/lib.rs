@@ -87,6 +87,8 @@ pub use remote::{
 pub use core::doc_timestamp::{add_document_timestamp, add_document_timestamp_pool};
 
 #[cfg(feature = "verify")]
+pub use verify::cms_verify::verify_cms_all;
+#[cfg(feature = "verify")]
 pub use verify::SignatureVerifier;
 
 #[cfg(feature = "visual")]
