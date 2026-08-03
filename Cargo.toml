@@ -20,9 +20,9 @@ exclude = [
 default = ["tsp", "ltv", "visual", "verify", "blocking", "saci", "svt", "report", "inspect"]
 
 # Network-dependent features
-tsp      = ["dep:reqwest", "dep:tokio"]       # RFC 3161 timestamping
-ltv      = ["tsp"]                             # LTV requires TSP + OCSP/CRL fetching
-blocking = ["dep:tokio"]                       # Sync wrappers via block_on()
+tsp      = ["dep:reqwest", "dep:tokio", "tsp-ltv/tsp"]  # RFC 3161 timestamping
+ltv      = ["tsp", "tsp-ltv/ltv"]              # LTV requires TSP + OCSP/CRL fetching
+blocking = ["dep:tokio", "tsp-ltv/blocking"]   # Sync wrappers via block_on()
 
 # Optional modules
 visual   = ["dep:image", "dep:subsetter", "dep:ttf-parser"]  # Visible signature appearances + font subsetting
@@ -33,8 +33,11 @@ report   = ["verify", "dep:uppsala"]                      # ETSI TS 119 102-2 va
 inspect  = ["dep:serde_json"]                              # PDF object inspection and metadata extraction
 
 [dependencies]
-# Shared TSP/LTV infrastructure
-tsp-ltv = "0.2"
+# Shared TSP/LTV infrastructure.
+# Its defaults enable tsp/ltv/blocking, which pull in reqwest, rustls and tokio.
+# Turn them off and forward from our own features instead, so a build with
+# --no-default-features doesn't drag the network stack in regardless.
+tsp-ltv = { version = "0.2", default-features = false }
 
 # PDF parsing and manipulation
 lopdf = "0.39"
