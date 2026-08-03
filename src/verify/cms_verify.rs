@@ -10,7 +10,7 @@ use cms::signed_data::{SignedData, SignerIdentifier, SignerInfo};
 use const_oid::db::rfc5911;
 use const_oid::ObjectIdentifier;
 use der::asn1::OctetString;
-use der::{Decode, Encode};
+use der::{Any, Decode, Encode};
 use x509_cert::Certificate;
 
 use chrono::{DateTime, Utc};
@@ -98,6 +98,9 @@ pub struct CmsVerifyResult {
     ///
     /// Needed for ETSI TS 119 102-2 `<ds:SignatureMethod>` in reports.
     pub signature_algorithm_oid: Option<String>,
+    /// One entry per countersignature attached to this signer (RFC 5652 §11.4),
+    /// in the order they appear. Empty when there are none.
+    pub countersignatures: Vec<CountersignatureResult>,
     /// Human-readable issues
     pub issues: Vec<String>,
 }
@@ -281,9 +284,16 @@ fn verify_cms_signer(
         false
     };
 
+    // Step 10: Verify anything countersigning this signature. A countersignature
+    // rides in unsigned attributes, so nothing above would have noticed a forged
+    // one — it has to be checked on its own terms.
+    let countersignatures =
+        verify_countersignatures(signer_info, &signature_value, &embedded_certificates);
+
     Ok(CmsVerifyResult {
         signature_valid,
         digest_matches,
+        countersignatures,
         signer_certificate,
         embedded_certificates,
         digest_algorithm,
@@ -1227,6 +1237,173 @@ fn verify_signer_info_signature(
         signature_bytes,
         &spki_der,
     )
+}
+
+/// `id-countersignature`: `1.2.840.113549.1.9.6` (RFC 5652 §11.4).
+const OID_COUNTERSIGNATURE: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.6");
+
+/// The outcome of checking one countersignature (RFC 5652 §11.4).
+#[derive(Debug, Clone)]
+pub struct CountersignatureResult {
+    /// The countersigner's signature over its own signed attributes verifies.
+    pub signature_valid: bool,
+    /// Its `messageDigest` is the digest of the signature value it countersigns.
+    ///
+    /// This is the binding that makes it a countersignature rather than a
+    /// signature over something unrelated: without it, a valid `SignerInfo`
+    /// lifted from any other document would sit here looking legitimate.
+    pub digest_matches: bool,
+    /// The countersigner's certificate, when it is among the embedded ones.
+    pub signer_certificate: Option<Certificate>,
+    /// The digest algorithm the countersigner used.
+    pub digest_algorithm: Option<DigestAlgorithm>,
+    /// Its `signingTime` signed attribute, if present.
+    pub signing_time: Option<DateTime<Utc>>,
+    /// Human-readable issues.
+    pub issues: Vec<String>,
+}
+
+/// Verify every countersignature attached to `signer_info`.
+///
+/// `covered_signature` is the signature value of `signer_info` — what a
+/// countersigner commits to. Returns one result per countersignature, in the
+/// order they appear; an empty vector means there were none.
+fn verify_countersignatures(
+    signer_info: &SignerInfo,
+    covered_signature: &[u8],
+    certificates: &[Certificate],
+) -> Vec<CountersignatureResult> {
+    let Some(unsigned) = signer_info.unsigned_attrs.as_ref() else {
+        return Vec::new();
+    };
+
+    let mut results = Vec::new();
+    for attr in unsigned.iter().filter(|a| a.oid == OID_COUNTERSIGNATURE) {
+        for value in attr.values.iter() {
+            results.push(verify_one_countersignature(
+                value,
+                covered_signature,
+                certificates,
+            ));
+        }
+    }
+    results
+}
+
+fn verify_one_countersignature(
+    value: &Any,
+    covered_signature: &[u8],
+    certificates: &[Certificate],
+) -> CountersignatureResult {
+    let mut issues = Vec::new();
+    let mut result = CountersignatureResult {
+        signature_valid: false,
+        digest_matches: false,
+        signer_certificate: None,
+        digest_algorithm: None,
+        signing_time: None,
+        issues: Vec::new(),
+    };
+
+    // `Any` keeps the value bytes as they were read, so this is the DER the
+    // countersigner actually signed inside — not a re-encoding of it.
+    let der = match value.to_der() {
+        Ok(der) => der,
+        Err(e) => {
+            result.issues = vec![format!("countersignature is not encodable: {e}")];
+            return result;
+        }
+    };
+    let counter = match SignerInfo::from_der(&der) {
+        Ok(counter) => counter,
+        Err(e) => {
+            result.issues = vec![format!("countersignature is not a SignerInfo: {e}")];
+            return result;
+        }
+    };
+
+    result.digest_algorithm = oid_to_digest_algorithm(&counter.digest_alg.oid);
+    result.signing_time = extract_signing_time(&counter);
+    result.signer_certificate = find_signer_certificate(&counter, certificates);
+
+    // RFC 5652 §11.4: a countersignature carries no contentType attribute.
+    if let Some(signed_attrs) = counter.signed_attrs.as_ref() {
+        if signed_attrs
+            .iter()
+            .any(|a| a.oid == rfc5911::ID_CONTENT_TYPE)
+        {
+            issues.push(
+                "countersignature carries a contentType attribute, which RFC 5652 §11.4 forbids"
+                    .to_string(),
+            );
+        }
+    }
+
+    // The binding: messageDigest is the digest of the signature it covers.
+    match (extract_message_digest(&counter), result.digest_algorithm) {
+        (Some(digest), Some(algorithm)) => {
+            result.digest_matches = digest == algorithm.digest(covered_signature);
+            if !result.digest_matches {
+                issues.push(
+                    "countersignature messageDigest does not match the signature it covers"
+                        .to_string(),
+                );
+            }
+        }
+        (None, _) => issues.push("countersignature has no messageDigest attribute".to_string()),
+        (_, None) => issues.push(format!(
+            "countersignature uses an unsupported digest algorithm: {}",
+            counter.digest_alg.oid
+        )),
+    }
+
+    // The signature itself, over the countersigner's own signed attributes.
+    match (
+        raw_signed_attrs_of(&der),
+        result.signer_certificate.as_ref(),
+    ) {
+        (Some(attrs), Some(cert)) => match cert.tbs_certificate.subject_public_key_info.to_der() {
+            Ok(spki) => match verify_cms_signature(
+                &counter.signature_algorithm.oid,
+                &counter.digest_alg.oid,
+                &attrs,
+                counter.signature.as_bytes(),
+                &spki,
+            ) {
+                Ok(()) => result.signature_valid = true,
+                Err(e) => issues.push(format!("countersignature verification failed: {e}")),
+            },
+            Err(e) => issues.push(format!("cannot encode countersigner SPKI: {e}")),
+        },
+        (None, _) => issues.push("countersignature has no signed attributes".to_string()),
+        (_, None) => issues
+            .push("countersigner certificate not found among embedded certificates".to_string()),
+    }
+
+    result.issues = issues;
+    result
+}
+
+/// The `signedAttrs` of a bare `SignerInfo`, as the `SET OF` that was signed.
+///
+/// Same reasoning as [`extract_raw_signed_attrs`]: read the bytes, never
+/// re-encode them.
+fn raw_signed_attrs_of(signer_info_der: &[u8]) -> Option<Vec<u8>> {
+    let reader = DerReader::new(signer_info_der);
+    let (_, body) = reader.read_sequence(0)?;
+
+    let fields = DerReader::new(body);
+    let (pos, _) = fields.read_tlv(0)?; // version
+    let (pos, _) = fields.read_tlv(pos)?; // sid
+    let (pos, _) = fields.read_tlv(pos)?; // digestAlgorithm
+
+    if pos < body.len() && body[pos] == 0xA0 {
+        let (_, raw) = fields.read_tlv_raw(pos)?;
+        let mut attrs = raw.to_vec();
+        attrs[0] = 0x31; // [0] IMPLICIT → SET OF, which is what was signed
+        return Some(attrs);
+    }
+    None
 }
 
 /// Extract the raw signed attributes bytes from the original CMS DER,
