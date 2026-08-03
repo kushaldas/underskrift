@@ -55,8 +55,8 @@ for tool in pdfsig qpdf certutil openssl; do
     command -v "$tool" >/dev/null || die "$tool not found on PATH"
 done
 
-[ -f "$fixtures/signer.p12" ] \
-    || die "no signer.p12 — run gen-test-fixtures.sh from tests/fixtures first"
+# No check for the fixtures here on purpose: the cargo invocation below runs
+# build.rs, which generates them when they are missing.
 
 # --- the document under test -------------------------------------------------
 
