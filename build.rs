@@ -16,12 +16,13 @@ use std::process::Command;
 /// What `gen-test-fixtures.sh` leaves behind. The private keys and the
 /// serial files are deliberately not listed: the certificates are what the
 /// build and the test suite actually read.
-const GENERATED: [&str; 5] = [
+const GENERATED: [&str; 6] = [
     "ca_cert.pem",
     "intermediate_ca_cert.pem",
     "signer_cert.pem",
     "chain.pem",
     "signer.p12",
+    "foreign_envelope.p7m",
 ];
 
 fn main() {
@@ -37,7 +38,8 @@ fn main() {
         println!("cargo:rerun-if-changed=tests/fixtures/{name}");
     }
 
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is always set");
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is always set");
     let fixtures = Path::new(&manifest_dir).join("tests").join("fixtures");
     let script = Path::new(&manifest_dir).join("gen-test-fixtures.sh");
 

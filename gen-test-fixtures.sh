@@ -80,6 +80,21 @@ openssl pkcs12 -export -legacy \
     -out signer.p12 \
     -passout "pass:${PASSWORD}"
 
+# An enveloping CMS written by an implementation that shares no code with
+# underskrift. Tests that only ever read our own output cannot catch a wrong
+# reading of somebody else's, and this is the cheapest honest stand-in for the
+# third-party signers (Dike, ArubaSign, …) whose files have to be composed onto
+# in production. Note openssl writes signatureAlgorithm as plain rsaEncryption
+# per RFC 3370 §3.2 — a shape our verifier used to reject.
+echo "=== Signing a CMS envelope with openssl (foreign producer) ==="
+openssl cms -sign -binary -nodetach -md sha256 \
+    -in sample.pdf \
+    -signer signer_cert.pem \
+    -inkey signer_key.pem \
+    -certfile intermediate_ca_cert.pem \
+    -outform DER \
+    -out foreign_envelope.p7m
+
 echo "=== Cleaning up intermediate artifacts ==="
 rm -f intermediate_ca.csr signer.csr intermediate_ca_cert.srl
 
@@ -93,5 +108,6 @@ echo "  Signer cert:             signer_cert.pem"
 echo "  Signer key:              signer_key.pem  (DO NOT COMMIT)"
 echo "  PKCS#12 bundle:          signer.p12  (DO NOT COMMIT, password: ${PASSWORD})"
 echo "  Full chain:              chain.pem"
+echo "  Foreign CMS envelope:    foreign_envelope.p7m  (signed by openssl, not by us)"
 echo ""
 echo "Run tests with: cd ../.. && cargo test --all-features"

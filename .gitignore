@@ -16,3 +16,4 @@ tests/fixtures/intermediate_ca_cert.pem
 tests/fixtures/signer_cert.pem
 tests/fixtures/chain.pem
 tests/fixtures/*.csr
+tests/fixtures/foreign_envelope.p7m
