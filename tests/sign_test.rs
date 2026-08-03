@@ -12,6 +12,45 @@ fn test_pdf() -> Vec<u8> {
     std::fs::read(path).expect("failed to read test PDF")
 }
 
+/// The name the embedded font is given inside the PDF. It is ours to choose, so
+/// it stays fixed however the system font is actually called.
+const EMBEDDED_FONT_NAME: &str = "EmbeddedTestFont";
+
+/// A TrueType font from the system, located with fontconfig.
+///
+/// What these tests need is *a* TrueType file to subset and embed, not one
+/// particular typeface. Asking fontconfig for it beats hard-coding a path:
+/// every distribution files DejaVu somewhere else, and a hard-coded Debian path
+/// reports "font not found, install the package" on an Arch box where the
+/// package is installed. `fc-match` also never comes back empty-handed — with
+/// no DejaVu it returns the closest TrueType the system does have, which serves
+/// just as well.
+///
+/// Set `UNDERSKRIFT_TEST_FONT` to a `.ttf` to bypass all of this.
+fn embeddable_font() -> Vec<u8> {
+    let path = match std::env::var("UNDERSKRIFT_TEST_FONT") {
+        Ok(path) => path,
+        Err(_) => {
+            let matched = std::process::Command::new("fc-match")
+                .args(["-f", "%{file}", "DejaVu Sans:fontformat=TrueType"])
+                .output()
+                .expect(
+                    "fontconfig (fc-match) is not installed; \
+                     point UNDERSKRIFT_TEST_FONT at a .ttf instead",
+                );
+            let path = String::from_utf8_lossy(&matched.stdout).trim().to_string();
+            assert!(
+                path.ends_with(".ttf"),
+                "fontconfig matched {path:?}, which is not a TrueType file; \
+                 point UNDERSKRIFT_TEST_FONT at one"
+            );
+            path
+        }
+    };
+
+    std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read the font at {path}: {e}"))
+}
+
 #[tokio::test]
 async fn test_sign_pdf_pades() {
     let pdf = test_pdf();
@@ -616,9 +655,7 @@ async fn test_sign_pdf_with_embedded_font_text_only() {
     let pdf = test_pdf();
     let signer = test_signer();
 
-    // Load a system TTF font (DejaVu Sans is widely available)
-    let font_data = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-        .expect("DejaVuSans.ttf not found; install fonts-dejavu-core");
+    let font_data = embeddable_font();
 
     let vis_config = VisibleSignatureConfig {
         page: 0,
@@ -636,7 +673,7 @@ async fn test_sign_pdf_with_embedded_font_text_only() {
             ],
             font: FontSpec::Embedded {
                 data: font_data,
-                name: "DejaVuSans".to_string(),
+                name: EMBEDDED_FONT_NAME.to_string(),
             },
             font_size: 9.0,
             ..TextConfig::default()
@@ -689,7 +726,7 @@ async fn test_sign_pdf_with_embedded_font_text_only() {
         "should have ToUnicode CMap"
     );
     assert!(
-        signed_str.contains("DejaVuSans"),
+        signed_str.contains(EMBEDDED_FONT_NAME),
         "should contain font name"
     );
 
@@ -709,9 +746,7 @@ async fn test_sign_pdf_with_embedded_font_image_and_text() {
     let pdf = test_pdf();
     let signer = test_signer();
 
-    // Load a system TTF font
-    let font_data = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-        .expect("DejaVuSans.ttf not found; install fonts-dejavu-core");
+    let font_data = embeddable_font();
 
     // Create a small test JPEG
     let jpeg_data = {
@@ -743,7 +778,7 @@ async fn test_sign_pdf_with_embedded_font_image_and_text() {
                 ],
                 font: FontSpec::Embedded {
                     data: font_data,
-                    name: "DejaVuSans".to_string(),
+                    name: EMBEDDED_FONT_NAME.to_string(),
                 },
                 font_size: 8.0,
                 ..TextConfig::default()
