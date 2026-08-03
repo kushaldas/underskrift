@@ -1147,3 +1147,105 @@ async fn test_bt_without_tsa_url_errors() {
     assert!(result.is_err());
     assert!(format!("{}", result.unwrap_err()).contains("TSA URL"));
 }
+
+/// `/M` carries the signing date so readers don't fall back to the epoch.
+/// Under PAdES the CMS `signingTime` attribute is forbidden, so the signature
+/// dictionary is the only place the date can live.
+#[tokio::test]
+async fn test_signing_time_lands_in_the_m_entry() {
+    let signing_time = chrono::NaiveDate::from_ymd_opt(2024, 3, 17)
+        .unwrap()
+        .and_hms_opt(14, 25, 36)
+        .unwrap();
+
+    let signed = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "SigWithDate".to_string(),
+            cms_signing_time: Some(signing_time),
+            ..Default::default()
+        })
+        .sign(&test_pdf(), &test_signer())
+        .await
+        .expect("signing failed");
+
+    assert!(
+        contains_subslice(&signed, b"/M (D:20240317142536)"),
+        "signature dictionary should carry /M with the requested signing time"
+    );
+
+    // Without a signing time there is nothing to write, so /M stays absent.
+    let undated = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "SigWithoutDate".to_string(),
+            ..Default::default()
+        })
+        .sign(&test_pdf(), &test_signer())
+        .await
+        .expect("signing failed");
+
+    assert!(
+        !contains_subslice(&undated, b"/M (D:"),
+        "no signing time set, so /M should not be written"
+    );
+}
+
+/// The counterpart to `test_certification_signature_emits_docmdp`: without
+/// `certify` neither the DocMDP transform nor `/Perms` may appear.
+#[tokio::test]
+async fn test_approval_signature_emits_no_docmdp() {
+    let approval = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "ApprovalSignature".to_string(),
+            ..Default::default()
+        })
+        .sign(&test_pdf(), &test_signer())
+        .await
+        .expect("signing failed");
+
+    assert!(
+        !contains_subslice(&approval, b"/DocMDP"),
+        "an approval signature should not declare DocMDP"
+    );
+    assert!(
+        !contains_subslice(&approval, b"/Perms"),
+        "an approval signature should not touch /Perms"
+    );
+}
+
+/// Only one certification signature is allowed per document, and it must be the
+/// first. Certifying twice must fail rather than emit a file readers flag as
+/// tampered with.
+#[tokio::test]
+async fn test_second_certification_signature_is_rejected() {
+    let certify = |field: &str| SigningOptions {
+        sub_filter: SubFilter::Pades,
+        field_name: field.to_string(),
+        certify: true,
+        ..Default::default()
+    };
+
+    let certified = PdfSigner::new()
+        .options(certify("FirstAuthorSignature"))
+        .sign(&test_pdf(), &test_signer())
+        .await
+        .expect("first certification should succeed");
+
+    let result = PdfSigner::new()
+        .options(certify("SecondAuthorSignature"))
+        .sign(&certified, &test_signer())
+        .await;
+
+    // Matched rather than unwrapped: the Ok value is a whole PDF, and letting
+    // `expect_err` render it buries the failure under megabytes of bytes.
+    let err = match result {
+        Ok(_) => panic!("certifying an already-certified document should fail"),
+        Err(e) => e,
+    };
+    assert!(
+        format!("{err}").contains("already has a certification signature"),
+        "unexpected error: {err}"
+    );
+}

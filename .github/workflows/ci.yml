@@ -48,3 +48,16 @@ jobs:
 
       - name: Build with default features only
         run: cargo build
+
+      - name: Build without network features
+        run: cargo build --no-default-features --features visual,blocking
+
+      # tsp-ltv enables tsp/ltv/blocking by default, which pull in reqwest and
+      # rustls. A build that asks for neither TSA nor LTV must not link them.
+      - name: Network stack stays out of non-network builds
+        run: |
+          if cargo tree -e normal -i reqwest \
+               --no-default-features --features visual,blocking >/dev/null 2>&1; then
+            echo "reqwest is linked into a build that requested no network features"
+            exit 1
+          fi
