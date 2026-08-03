@@ -196,6 +196,14 @@ pub enum CmsProfile {
     /// **and** includes signingTime as a signed attribute. Unlike PAdES, the
     /// signing time lives in the CMS rather than the PDF.
     Cades,
+    /// A `SignerInfo` destined for the `countersignature` unsigned attribute
+    /// (RFC 5652 §11.4). Same attributes as [`Cades`](CmsProfile::Cades) minus
+    /// `contentType`, which RFC 5652 forbids in a countersignature.
+    ///
+    /// The `data_hash` passed to the builder must be the digest of the
+    /// *signature value* of the `SignerInfo` being countersigned, not of the
+    /// content. See [`cades::countersign`](crate::cades::countersign).
+    Countersignature,
 }
 
 /// Controls where the `signingTime` attribute is placed in the CMS structure.
@@ -261,6 +269,8 @@ pub struct PdfCmsBuilder<'a> {
     commitment_type: Option<CommitmentType>,
     /// Optional signature-policy-identifier signed attribute
     signature_policy: Option<SignaturePolicy>,
+    /// Content to encapsulate (None = detached, the default for PDF signing)
+    econtent: Option<Vec<u8>>,
 }
 
 impl<'a> PdfCmsBuilder<'a> {
@@ -274,7 +284,39 @@ impl<'a> PdfCmsBuilder<'a> {
             signing_time_placement: SigningTimePlacement::default(),
             commitment_type: None,
             signature_policy: None,
+            econtent: None,
         }
+    }
+
+    /// Encapsulate `content` inside the `SignedData` (attached signature).
+    ///
+    /// By default the builder produces a **detached** signature, which is what
+    /// PDF signing needs: the signed bytes stay in the document and the CMS
+    /// carries only their digest. Calling this switches to an **enveloping**
+    /// signature, where the signed bytes travel inside the CMS itself — the
+    /// shape used by standalone CAdES envelopes (`.p7m` files in Italy).
+    ///
+    /// The caller must still pass the digest of the same `content` to
+    /// [`build`](Self::build) / [`pre_sign`](Self::pre_sign): the `messageDigest`
+    /// signed attribute is computed over the content either way.
+    pub fn encapsulate(mut self, content: &[u8]) -> Self {
+        self.econtent = Some(content.to_vec());
+        self
+    }
+
+    /// Build the `EncapsulatedContentInfo` — detached unless [`encapsulate`](Self::encapsulate)
+    /// was called.
+    fn encap_content_info(&self) -> Result<EncapsulatedContentInfo, CmsError> {
+        let econtent = match &self.econtent {
+            Some(content) => Some(Any::new(Tag::OctetString, content.as_slice()).map_err(|e| {
+                CmsError::Der(format!("failed to encode encapsulated content: {e}"))
+            })?),
+            None => None,
+        };
+        Ok(EncapsulatedContentInfo {
+            econtent_type: rfc5911::ID_DATA,
+            econtent,
+        })
     }
 
     /// Include a `commitment-type-indication` signed attribute identifying what
@@ -376,11 +418,8 @@ impl<'a> PdfCmsBuilder<'a> {
             .insert(digest_alg.clone())
             .map_err(|e| CmsError::Builder(format!("failed to build digest algorithm set: {e}")))?;
 
-        // 5. Build EncapsulatedContentInfo — detached (no econtent for PDF signing)
-        let encap_content_info = EncapsulatedContentInfo {
-            econtent_type: rfc5911::ID_DATA,
-            econtent: None,
-        };
+        // 5. Build EncapsulatedContentInfo — detached unless `encapsulate` was called
+        let encap_content_info = self.encap_content_info()?;
 
         // 6. Build signed attributes
         let signed_attrs = self.build_signed_attributes(data_hash, &cert)?;
@@ -494,11 +533,8 @@ impl<'a> PdfCmsBuilder<'a> {
             .insert(digest_alg.clone())
             .map_err(|e| CmsError::Builder(format!("failed to build digest algorithm set: {e}")))?;
 
-        // 5. Build EncapsulatedContentInfo (detached)
-        let encap_content_info = EncapsulatedContentInfo {
-            econtent_type: rfc5911::ID_DATA,
-            econtent: None,
-        };
+        // 5. Build EncapsulatedContentInfo — detached unless `encapsulate` was called
+        let encap_content_info = self.encap_content_info()?;
 
         // 6. Build signed attributes
         let signed_attrs = self.build_signed_attributes(data_hash, &cert)?;
@@ -603,8 +639,11 @@ impl<'a> PdfCmsBuilder<'a> {
     ) -> Result<SetOfVec<Attribute>, CmsError> {
         let mut attrs: Vec<Attribute> = Vec::new();
 
-        // 1. Content-type attribute (always required)
-        attrs.push(build_content_type_attr()?);
+        // 1. Content-type attribute — required everywhere except in a
+        //    countersignature, where RFC 5652 §11.4 forbids it.
+        if self.profile != CmsProfile::Countersignature {
+            attrs.push(build_content_type_attr()?);
+        }
 
         // 2. Message-digest attribute (always required)
         attrs.push(build_message_digest_attr(data_hash)?);
@@ -628,7 +667,7 @@ impl<'a> PdfCmsBuilder<'a> {
                     }
                 }
             }
-            CmsProfile::Cades => {
+            CmsProfile::Cades | CmsProfile::Countersignature => {
                 // CAdES baseline requires signingCertificateV2 and includes
                 // signingTime as a signed attribute when available.
                 attrs.push(self.build_signing_certificate_v2_attr(cert)?);

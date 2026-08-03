@@ -139,6 +139,38 @@ pub fn verify_cms_all(
         .collect()
 }
 
+/// Verify an **enveloping** CMS: one that carries the signed content inside it.
+///
+/// Recovers the encapsulated content, then verifies every signer against it —
+/// each with its own digest algorithm, so a mix of SHA-256 and SHA-512 signers
+/// all verify correctly. Returns the content alongside the per-signer results.
+///
+/// Errors only if the CMS cannot be parsed or is detached (nothing to verify
+/// against); a signature that fails to verify is reported in its
+/// [`CmsVerifyResult`], not as an error.
+pub fn verify_enveloped(cms_bytes: &[u8]) -> Result<(Vec<u8>, Vec<CmsVerifyResult>), VerifyError> {
+    let content = crate::cms::cades::extract_content(cms_bytes)
+        .map_err(|e| VerifyError::CmsVerification(e.to_string()))?;
+    let signed_data = parse_signed_data(cms_bytes)?;
+
+    let results = signed_data
+        .signer_infos
+        .0
+        .iter()
+        .enumerate()
+        .map(|(index, signer_info)| {
+            // An unrecognised digest algorithm yields no hash, so the signer is
+            // reported as a digest mismatch rather than failing the whole call.
+            let digest = oid_to_digest_algorithm(&signer_info.digest_alg.oid)
+                .map(|alg| alg.digest(&content))
+                .unwrap_or_default();
+            verify_cms_signer(cms_bytes, &digest, index)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok((content, results))
+}
+
 /// Parse the `SignedData` out of a DER `ContentInfo`.
 fn parse_signed_data(cms_bytes: &[u8]) -> Result<SignedData, VerifyError> {
     let content_info = ContentInfo::from_der(cms_bytes).map_err(|e| {
