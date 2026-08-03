@@ -258,6 +258,19 @@ impl PdfSigner {
                 Object::String(contact.as_bytes().to_vec(), lopdf::StringFormat::Literal),
             );
         }
+        // /M — the signing time as the reader sees it. Under the PAdES profile
+        // the CMS `signingTime` attribute is forbidden (ETSI EN 319 142-1), so
+        // without this entry readers fall back to the epoch. The date is
+        // written without a UTC offset, which PDF permits (ISO 32000-1 §7.9.4).
+        if let Some(t) = &self.options.cms_signing_time {
+            sig_dict.set(
+                "M",
+                Object::String(
+                    format!("D:{}", t.format("%Y%m%d%H%M%S")).into_bytes(),
+                    lopdf::StringFormat::Literal,
+                ),
+            );
+        }
 
         // Step 4: For a certification signature, add the DocMDP /Reference.
         if self.options.certify {
