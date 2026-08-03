@@ -1153,8 +1153,15 @@ fn verify_signer_info_signature(
     // Get the raw signature bytes
     let signature_bytes = signer_info.signature.as_bytes();
 
-    // Verify using the appropriate algorithm
-    verify_cms_signature(sig_alg_oid, &attrs_bytes, signature_bytes, &spki_der)
+    // Verify using the appropriate algorithm. The digest comes from the
+    // SignerInfo, needed when signatureAlgorithm names only the key algorithm.
+    verify_cms_signature(
+        sig_alg_oid,
+        &signer_info.digest_alg.oid,
+        &attrs_bytes,
+        signature_bytes,
+        &spki_der,
+    )
 }
 
 /// Extract the raw signed attributes bytes from the original CMS DER,
@@ -1320,8 +1327,15 @@ impl<'a> DerReader<'a> {
 }
 
 /// Verify a CMS signature given the algorithm OID, data, signature, and public key.
+///
+/// `digest_alg_oid` is the `SignerInfo`'s digest algorithm. It matters when
+/// `signatureAlgorithm` names only the key algorithm — RFC 3370 §3.2 says an RSA
+/// signer SHOULD write plain `rsaEncryption` there and leave the digest to be
+/// read from `digestAlgorithm`, which is what OpenSSL does by default. Rejecting
+/// that shape means rejecting signatures that are perfectly valid.
 fn verify_cms_signature(
     sig_alg_oid: &const_oid::ObjectIdentifier,
+    digest_alg_oid: &const_oid::ObjectIdentifier,
     data: &[u8],
     signature: &[u8],
     spki_der: &[u8],
@@ -1329,7 +1343,22 @@ fn verify_cms_signature(
     use crate::crypto::algorithm::{OID_ED25519, OID_RSASSA_PSS};
     use const_oid::db;
 
-    if *sig_alg_oid == db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION {
+    if *sig_alg_oid == db::rfc5912::RSA_ENCRYPTION {
+        match DigestAlgorithm::from_oid(digest_alg_oid) {
+            Some(DigestAlgorithm::Sha256) => {
+                verify_rsa_cms::<sha2::Sha256>(data, signature, spki_der)
+            }
+            Some(DigestAlgorithm::Sha384) => {
+                verify_rsa_cms::<sha2::Sha384>(data, signature, spki_der)
+            }
+            Some(DigestAlgorithm::Sha512) => {
+                verify_rsa_cms::<sha2::Sha512>(data, signature, spki_der)
+            }
+            _ => Err(VerifyError::CmsVerification(format!(
+                "rsaEncryption signature with unsupported digest algorithm: {digest_alg_oid}"
+            ))),
+        }
+    } else if *sig_alg_oid == db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION {
         verify_rsa_cms::<sha2::Sha256>(data, signature, spki_der)
     } else if *sig_alg_oid == db::rfc5912::SHA_384_WITH_RSA_ENCRYPTION {
         verify_rsa_cms::<sha2::Sha384>(data, signature, spki_der)
