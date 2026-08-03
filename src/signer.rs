@@ -587,9 +587,7 @@ impl PdfSigner {
         // certifying signature via /Perms /DocMDP. Mutate the catalog before it
         // is re-serialized into the incremental update below.
         if self.options.certify {
-            if let Ok(catalog) = doc.get_dictionary_mut(catalog_id) {
-                catalog.set("Perms", doc_mdp::build_docmdp_perms(sig_dict_id));
-            }
+            doc_mdp::set_docmdp_perms(&mut doc, catalog_id, sig_dict_id)?;
         }
 
         // Add sig dict
