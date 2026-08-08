@@ -12,6 +12,45 @@ fn test_pdf() -> Vec<u8> {
     std::fs::read(path).expect("failed to read test PDF")
 }
 
+/// The name the embedded font is given inside the PDF. It is ours to choose, so
+/// it stays fixed however the system font is actually called.
+const EMBEDDED_FONT_NAME: &str = "EmbeddedTestFont";
+
+/// A TrueType font from the system, located with fontconfig.
+///
+/// What these tests need is *a* TrueType file to subset and embed, not one
+/// particular typeface. Asking fontconfig for it beats hard-coding a path:
+/// every distribution files DejaVu somewhere else, and a hard-coded Debian path
+/// reports "font not found, install the package" on an Arch box where the
+/// package is installed. `fc-match` also never comes back empty-handed — with
+/// no DejaVu it returns the closest TrueType the system does have, which serves
+/// just as well.
+///
+/// Set `UNDERSKRIFT_TEST_FONT` to a `.ttf` to bypass all of this.
+fn embeddable_font() -> Vec<u8> {
+    let path = match std::env::var("UNDERSKRIFT_TEST_FONT") {
+        Ok(path) => path,
+        Err(_) => {
+            let matched = std::process::Command::new("fc-match")
+                .args(["-f", "%{file}", "DejaVu Sans:fontformat=TrueType"])
+                .output()
+                .expect(
+                    "fontconfig (fc-match) is not installed; \
+                     point UNDERSKRIFT_TEST_FONT at a .ttf instead",
+                );
+            let path = String::from_utf8_lossy(&matched.stdout).trim().to_string();
+            assert!(
+                path.ends_with(".ttf"),
+                "fontconfig matched {path:?}, which is not a TrueType file; \
+                 point UNDERSKRIFT_TEST_FONT at one"
+            );
+            path
+        }
+    };
+
+    std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read the font at {path}: {e}"))
+}
+
 #[tokio::test]
 async fn test_sign_pdf_pades() {
     let pdf = test_pdf();
@@ -616,9 +655,7 @@ async fn test_sign_pdf_with_embedded_font_text_only() {
     let pdf = test_pdf();
     let signer = test_signer();
 
-    // Load a system TTF font (DejaVu Sans is widely available)
-    let font_data = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-        .expect("DejaVuSans.ttf not found; install fonts-dejavu-core");
+    let font_data = embeddable_font();
 
     let vis_config = VisibleSignatureConfig {
         page: 0,
@@ -636,7 +673,7 @@ async fn test_sign_pdf_with_embedded_font_text_only() {
             ],
             font: FontSpec::Embedded {
                 data: font_data,
-                name: "DejaVuSans".to_string(),
+                name: EMBEDDED_FONT_NAME.to_string(),
             },
             font_size: 9.0,
             ..TextConfig::default()
@@ -689,7 +726,7 @@ async fn test_sign_pdf_with_embedded_font_text_only() {
         "should have ToUnicode CMap"
     );
     assert!(
-        signed_str.contains("DejaVuSans"),
+        signed_str.contains(EMBEDDED_FONT_NAME),
         "should contain font name"
     );
 
@@ -709,9 +746,7 @@ async fn test_sign_pdf_with_embedded_font_image_and_text() {
     let pdf = test_pdf();
     let signer = test_signer();
 
-    // Load a system TTF font
-    let font_data = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-        .expect("DejaVuSans.ttf not found; install fonts-dejavu-core");
+    let font_data = embeddable_font();
 
     // Create a small test JPEG
     let jpeg_data = {
@@ -743,7 +778,7 @@ async fn test_sign_pdf_with_embedded_font_image_and_text() {
                 ],
                 font: FontSpec::Embedded {
                     data: font_data,
-                    name: "DejaVuSans".to_string(),
+                    name: EMBEDDED_FONT_NAME.to_string(),
                 },
                 font_size: 8.0,
                 ..TextConfig::default()
@@ -1146,4 +1181,106 @@ async fn test_bt_without_tsa_url_errors() {
         .await;
     assert!(result.is_err());
     assert!(format!("{}", result.unwrap_err()).contains("TSA URL"));
+}
+
+/// `/M` carries the signing date so readers don't fall back to the epoch.
+/// Under PAdES the CMS `signingTime` attribute is forbidden, so the signature
+/// dictionary is the only place the date can live.
+#[tokio::test]
+async fn test_signing_time_lands_in_the_m_entry() {
+    let signing_time = chrono::NaiveDate::from_ymd_opt(2024, 3, 17)
+        .unwrap()
+        .and_hms_opt(14, 25, 36)
+        .unwrap();
+
+    let signed = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "SigWithDate".to_string(),
+            cms_signing_time: Some(signing_time),
+            ..Default::default()
+        })
+        .sign(&test_pdf(), &test_signer())
+        .await
+        .expect("signing failed");
+
+    assert!(
+        contains_subslice(&signed, b"/M (D:20240317142536)"),
+        "signature dictionary should carry /M with the requested signing time"
+    );
+
+    // Without a signing time there is nothing to write, so /M stays absent.
+    let undated = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "SigWithoutDate".to_string(),
+            ..Default::default()
+        })
+        .sign(&test_pdf(), &test_signer())
+        .await
+        .expect("signing failed");
+
+    assert!(
+        !contains_subslice(&undated, b"/M (D:"),
+        "no signing time set, so /M should not be written"
+    );
+}
+
+/// The counterpart to `test_certification_signature_emits_docmdp`: without
+/// `certify` neither the DocMDP transform nor `/Perms` may appear.
+#[tokio::test]
+async fn test_approval_signature_emits_no_docmdp() {
+    let approval = PdfSigner::new()
+        .options(SigningOptions {
+            sub_filter: SubFilter::Pades,
+            field_name: "ApprovalSignature".to_string(),
+            ..Default::default()
+        })
+        .sign(&test_pdf(), &test_signer())
+        .await
+        .expect("signing failed");
+
+    assert!(
+        !contains_subslice(&approval, b"/DocMDP"),
+        "an approval signature should not declare DocMDP"
+    );
+    assert!(
+        !contains_subslice(&approval, b"/Perms"),
+        "an approval signature should not touch /Perms"
+    );
+}
+
+/// Only one certification signature is allowed per document, and it must be the
+/// first. Certifying twice must fail rather than emit a file readers flag as
+/// tampered with.
+#[tokio::test]
+async fn test_second_certification_signature_is_rejected() {
+    let certify = |field: &str| SigningOptions {
+        sub_filter: SubFilter::Pades,
+        field_name: field.to_string(),
+        certify: true,
+        ..Default::default()
+    };
+
+    let certified = PdfSigner::new()
+        .options(certify("FirstAuthorSignature"))
+        .sign(&test_pdf(), &test_signer())
+        .await
+        .expect("first certification should succeed");
+
+    let result = PdfSigner::new()
+        .options(certify("SecondAuthorSignature"))
+        .sign(&certified, &test_signer())
+        .await;
+
+    // Matched rather than unwrapped: the Ok value is a whole PDF, and letting
+    // `expect_err` render it buries the failure under megabytes of bytes.
+    let err = match result {
+        Ok(_) => panic!("certifying an already-certified document should fail"),
+        Err(e) => e,
+    };
+    assert!(
+        format!("{err}").contains("already has a certification signature"),
+        "unexpected error: {err}"
+    );
 }

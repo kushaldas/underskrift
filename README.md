@@ -11,6 +11,9 @@ RFC 9321 SVT tokens, and ETSI TS 119 102-2 validation reports.
 
 - **PAdES B-B / B-T / B-LT / B-LTA** conformance levels
 - **PKCS#7** (traditional `adbe.pkcs7.detached`) signatures
+- **Standalone CAdES** (ETSI EN 319 122-1) over any file, not just PDF --
+  detached or enveloping (the shape distributed as `.p7m`), with parallel
+  signatures and RFC 5652 countersignatures
 - **Visible signatures** with configurable layouts, images (JPEG/PNG), and
   embedded font subsetting
 - **RFC 3161 timestamping** with TSA client and pool (failover)
@@ -67,6 +70,32 @@ let signed = PdfSigner::new()
     .await?;
 
 std::fs::write("signed.pdf", &signed)?;
+```
+
+### Sign any file (enveloping CAdES)
+
+The signature and the file travel together in one DER blob — the format
+distributed as `.p7m`. The extension is the caller's choice; the library only
+produces the bytes.
+
+```rust
+use underskrift::{cades, SoftwareSigner};
+
+let content = std::fs::read("contratto.pdf")?;
+let signer = SoftwareSigner::from_pkcs12_file("key.p12", "password")?;
+
+let envelope = cades::sign_attached(&content, &signer, Some(chrono::Utc::now().naive_utc()))?;
+std::fs::write("contratto.pdf.p7m", &envelope)?;
+
+// A second signer alongside the first, then a signature over that signature
+let envelope = cades::add_signer(&envelope, None, &other_signer, None)?;
+let envelope = cades::countersign(&envelope, 0, &boss, None)?;
+
+// Verification returns the content and one result per signer, each carrying the
+// verdict on the countersignatures attached to it
+let (content, results) = underskrift::verify_enveloped(&envelope)?;
+assert!(results.iter().all(|r| r.signature_valid && r.digest_matches));
+assert!(results[0].countersignatures.iter().all(|c| c.signature_valid && c.digest_matches));
 ```
 
 ### Verify a PDF
@@ -132,7 +161,8 @@ let signed_pdf = finalize_signature(prepared, &signature_bytes)?;
 | Module   | Description                                              |
 |----------|----------------------------------------------------------|
 | `core`   | PDF signature structures, byte ranges, incremental saves, revision parsing |
-| `cms`    | CMS/PKCS#7 SignedData construction (PAdES and traditional profiles)        |
+| `cms`    | CMS/PKCS#7 SignedData construction (PAdES, traditional and CAdES profiles) |
+| `cades`  | Standalone CAdES: detached and enveloping signatures, parallel signatures, countersignatures, B-T/B-LT attributes |
 | `crypto` | Signing key abstraction, software signer, algorithm registry              |
 | `signer` | High-level `PdfSigner` orchestrator with builder pattern                  |
 | `remote` | Three-phase remote/deferred signing protocol                              |

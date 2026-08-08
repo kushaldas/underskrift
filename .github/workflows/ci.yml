@@ -33,10 +33,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Generate test fixtures
-        working-directory: tests/fixtures
-        run: bash ../../gen-test-fixtures.sh
-
       - name: Build
         run: cargo build --all-features
 
@@ -48,3 +44,61 @@ jobs:
 
       - name: Build with default features only
         run: cargo build
+
+      - name: Build without network features
+        run: cargo build --no-default-features --features visual,blocking
+
+      # tsp-ltv enables tsp/ltv/blocking by default, which pull in reqwest and
+      # rustls. A build that asks for neither TSA nor LTV must not link them.
+      - name: Network stack stays out of non-network builds
+        run: |
+          if cargo tree -e normal -i reqwest \
+               --no-default-features --features visual,blocking >/dev/null 2>&1; then
+            echo "reqwest is linked into a build that requested no network features"
+            exit 1
+          fi
+
+  # Every check in the `test` job verifies underskrift's output with
+  # underskrift. This one hands a signed PDF to implementations that share no
+  # code with us, which is the only way a conformance regression shows up.
+  interop:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-interop-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-interop-
+            ${{ runner.os }}-cargo-
+
+      - name: Install verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            poppler-utils qpdf libnss3-tools
+
+      # Pinned release tarball rather than a third-party action: one less thing
+      # that can change under us. e2e-verify.sh falls back to the sample
+      # fixture if this ever fails, so the job still checks signing.
+      - name: Install typst
+        run: |
+          curl -fsSL "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz" \
+            | tar -xJ --strip-components=1 -C /usr/local/bin typst-x86_64-unknown-linux-musl/typst
+          typst --version
+        env:
+          TYPST_VERSION: 0.15.1
+
+      - name: Sign and verify against poppler, qpdf and openssl
+        run: tests/e2e-verify.sh

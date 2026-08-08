@@ -2,10 +2,18 @@
 /target/
 Cargo.lock
 
-# Private keys and PKCS#12 bundles — NEVER commit these
+# Everything gen-test-fixtures.sh produces. The CA is re-rolled on every run,
+# so a committed copy goes stale against the signer.p12 actually in use and
+# reports as an unknown issuer — run the script, don't commit its output.
 tests/fixtures/ca_key.pem
 tests/fixtures/intermediate_ca_key.pem
 tests/fixtures/signer_key.pem
 tests/fixtures/signer.p12
 tests/fixtures/ca_cert.srl
 tests/fixtures/intermediate_ca_cert.srl
+tests/fixtures/ca_cert.pem
+tests/fixtures/intermediate_ca_cert.pem
+tests/fixtures/signer_cert.pem
+tests/fixtures/chain.pem
+tests/fixtures/*.csr
+tests/fixtures/foreign_envelope.p7m
