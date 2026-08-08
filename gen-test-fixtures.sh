@@ -73,7 +73,13 @@ echo "=== Building certificate chain ==="
 cat signer_cert.pem intermediate_ca_cert.pem ca_cert.pem > chain.pem
 
 echo "=== Creating PKCS#12 bundle (legacy format for p12 crate) ==="
-openssl pkcs12 -export -legacy \
+# OpenSSL 3 defaults to AES-256 and needs -legacy to emit the RC2/3DES shape the
+# p12 crate can read. LibreSSL — what `openssl` is on macOS — writes that shape
+# anyway and rejects the flag outright. Left unquoted on purpose: empty must
+# expand to no argument at all, and macOS still ships bash 3.2, where an empty
+# "${array[@]}" trips `set -u`.
+if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then LEGACY=-legacy; else LEGACY=; fi
+openssl pkcs12 -export ${LEGACY} \
     -inkey signer_key.pem \
     -in signer_cert.pem \
     -certfile intermediate_ca_cert.pem \

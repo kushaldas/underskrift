@@ -9,9 +9,7 @@ repository = "https://github.com/kushaldas/underskrift"
 keywords = ["pdf", "signing", "pades", "pkcs7", "digital-signature"]
 categories = ["cryptography", "parser-implementations"]
 
-# Keep test-only and dev-only assets out of the published crate. Excluding the
-# whole fixtures directory also makes build.rs inert for consumers: with no
-# tests/fixtures to fill in, it returns without doing anything.
+# Keep test-only and dev-only assets out of the published crate.
 exclude = [
     "tests/fixtures",
     "2025_signed.pdf",

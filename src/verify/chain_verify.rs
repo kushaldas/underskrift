@@ -554,31 +554,31 @@ mod tests {
         use crate::ltv::revocation::RevocationConfig;
         use crate::trust::TrustStore;
         use der::Decode;
+        use std::path::Path;
 
-        fn load_cert(pem: &str) -> Certificate {
-            let (_, der) = pem_rfc7468::decode_vec(pem.as_bytes()).unwrap();
+        /// Read at test time, not with `include_str!`: the fixtures are minted
+        /// by `gen-test-fixtures.sh`, and embedding them made a missing cert a
+        /// *compile* error for the whole crate.
+        fn load_cert(name: &str) -> Certificate {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name);
+            let pem = std::fs::read(&path).unwrap_or_else(|e| {
+                panic!(
+                    "{}: {e} — run `cd tests/fixtures && bash ../../gen-test-fixtures.sh`",
+                    path.display()
+                )
+            });
+            let (_, der) = pem_rfc7468::decode_vec(&pem).unwrap();
             Certificate::from_der(&der).unwrap()
         }
 
-        fn _ca_cert() -> Certificate {
-            load_cert(include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/ca_cert.pem"
-            )))
-        }
-
         fn intermediate_cert() -> Certificate {
-            load_cert(include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/intermediate_ca_cert.pem"
-            )))
+            load_cert("intermediate_ca_cert.pem")
         }
 
         fn signer_cert() -> Certificate {
-            load_cert(include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/signer_cert.pem"
-            )))
+            load_cert("signer_cert.pem")
         }
 
         fn make_trust_store() -> TrustStore {
